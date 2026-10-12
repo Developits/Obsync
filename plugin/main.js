@@ -119,7 +119,8 @@ var SyncClient = class {
     this.requestUrlFn = requestUrlFn;
   }
   url(endpoint) {
-    return `${this.baseUrl.replace(/\/+$/, "")}/v1${endpoint}`;
+    const cleanBase = this.baseUrl.trim().replace(/\s+/g, "").replace(/\/+$/, "");
+    return `${cleanBase}/v1${endpoint}`;
   }
   async request(method, endpoint, opts = {}) {
     const fullUrl = this.url(endpoint);
@@ -373,7 +374,7 @@ var DistributedSyncSettingTab = class extends import_obsidian.PluginSettingTab {
     containerEl.createEl("h2", { text: "Distributed Sync Settings" });
     new import_obsidian.Setting(containerEl).setName("Server URL").setDesc("The URL of your Cloudflare Worker sync server (e.g., https://sync.example.workers.dev)").addText(
       (text) => text.setPlaceholder("http://localhost:8787").setValue(this.plugin.settings.serverUrl).onChange(async (val) => {
-        this.plugin.settings.serverUrl = val.trim();
+        this.plugin.settings.serverUrl = val.trim().replace(/\s+/g, "");
         await this.plugin.saveSettings();
       })
     );

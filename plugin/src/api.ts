@@ -106,7 +106,8 @@ export class SyncClient {
   }
 
   private url(endpoint: string): string {
-    return `${this.baseUrl.replace(/\/+$/, "")}/v1${endpoint}`;
+    const cleanBase = this.baseUrl.trim().replace(/\s+/g, "").replace(/\/+$/, "");
+    return `${cleanBase}/v1${endpoint}`;
   }
 
   private async request(

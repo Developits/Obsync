@@ -43,7 +43,7 @@ export class DistributedSyncSettingTab extends PluginSettingTab {
           .setPlaceholder("http://localhost:8787")
           .setValue(this.plugin.settings.serverUrl)
           .onChange(async (val) => {
-            this.plugin.settings.serverUrl = val.trim();
+            this.plugin.settings.serverUrl = val.trim().replace(/\s+/g, "");
             await this.plugin.saveSettings();
           })
       );
