@@ -16,6 +16,7 @@ export interface VaultAdapter {
   exists(path: string): Promise<boolean>;
   mkdir(path: string): Promise<void>;
   stat(path: string): Promise<{ mtime: number; size: number } | null>;
+  listFiles?(): Promise<string[]>;
 }
 
 export interface SyncEngineOptions {
@@ -26,6 +27,7 @@ export interface SyncEngineOptions {
   excludes?: string[];
   onConflict?: (originalPath: string, conflictPath: string) => void;
   onLog?: (message: string) => void;
+  onProgress?: (current: number, total: number, path: string) => void;
 }
 
 export async function computeSha256(buffer: ArrayBuffer): Promise<string> {
@@ -42,6 +44,7 @@ export class SyncEngine {
   private excludes: string[];
   private onConflict?: (originalPath: string, conflictPath: string) => void;
   private onLog?: (message: string) => void;
+  private onProgress?: (current: number, total: number, path: string) => void;
 
   constructor(opts: SyncEngineOptions) {
     this.adapter = opts.adapter;
@@ -51,6 +54,7 @@ export class SyncEngine {
     this.excludes = opts.excludes || [];
     this.onConflict = opts.onConflict;
     this.onLog = opts.onLog;
+    this.onProgress = opts.onProgress;
   }
 
   private log(msg: string): void {
@@ -67,6 +71,42 @@ export class SyncEngine {
     let pulledCount = 0;
     let pushedCount = 0;
     let conflictCount = 0;
+
+    // Phase 0: Reconcile local vault files with index (discovers pre-existing and externally modified files)
+    if (this.adapter.listFiles) {
+      const diskPaths = await this.adapter.listFiles();
+      const diskSet = new Set<string>();
+      for (const p of diskPaths) {
+        const norm = normalizePath(p);
+        if (isIgnored(norm, this.excludes)) continue;
+        diskSet.add(norm);
+        const known = this.index.get(norm);
+        if (!known) {
+          // Untracked pre-existing file: mark dirty with base_rev 0
+          const stat = await this.adapter.stat(norm);
+          this.index.set(norm, {
+            base_rev: 0,
+            base_hash: "",
+            local_hash: "",
+            mtime: stat?.mtime ?? Date.now(),
+            dirty: true,
+          });
+        } else if (!known.dirty) {
+          // Detect modification done outside Obsidian while plugin was inactive
+          const stat = await this.adapter.stat(norm);
+          if (stat && known.mtime && stat.mtime > known.mtime + 1000) {
+            this.index.set(norm, { ...known, dirty: true, mtime: stat.mtime });
+          }
+        }
+      }
+      // Detect deletion done outside Obsidian while plugin was inactive
+      for (const [path, state] of this.index.allEntries()) {
+        if (isIgnored(path, this.excludes)) continue;
+        if (!diskSet.has(path) && state.base_rev > 0 && !state.dirty) {
+          this.index.set(path, { ...state, dirty: true });
+        }
+      }
+    }
 
     // Phase 1: Pull remote changes
     const initialSeq = this.index.getSeq();
@@ -113,9 +153,22 @@ export class SyncEngine {
     }
 
     // Phase 3: Push local modifications and deletions
-    for (const [path, state] of this.index.allEntries()) {
-      if (isIgnored(path, this.excludes)) continue;
-      if (!state.dirty) continue;
+    const dirtyEntries = Array.from(this.index.allEntries()).filter(
+      ([path, state]) => state.dirty && !isIgnored(path, this.excludes)
+    );
+    const totalDirty = dirtyEntries.length;
+    let dirtyProgressIndex = 0;
+
+    for (const [path, state] of dirtyEntries) {
+      dirtyProgressIndex++;
+      if (this.onProgress) {
+        this.onProgress(dirtyProgressIndex, totalDirty, path);
+      }
+
+      // Yield event loop briefly every 10 files to keep UI responsive on large vaults
+      if (dirtyProgressIndex % 10 === 0) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
 
       const fileExists = await this.adapter.exists(path);
       if (!fileExists) {

@@ -177,6 +177,10 @@ export class FakeVault {
     if (!buf) return null;
     return { mtime: Date.now(), size: buf.byteLength };
   }
+
+  async listFiles() {
+    return Array.from(this.files.keys());
+  }
 }
 
 export async function createTestServer() {

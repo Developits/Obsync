@@ -123,6 +123,7 @@ export default class DistributedSyncPlugin extends Plugin {
         const s = await this.app.vault.adapter.stat(path);
         return s ? { mtime: s.mtime, size: s.size } : null;
       },
+      listFiles: async () => this.app.vault.getFiles().map((f) => f.path),
     };
 
     this.engine = new SyncEngine({
@@ -134,6 +135,9 @@ export default class DistributedSyncPlugin extends Plugin {
       onConflict: (orig, conflict) => {
         new Notice(`Sync conflict on ${orig}. Saved remote version to ${conflict}`, 8000);
         this.updateStatus("conflict");
+      },
+      onProgress: (current, total) => {
+        this.updateStatus("syncing", `${current}/${total}`);
       },
       onLog: (msg) => {
         console.log(`[DistributedSync] ${msg}`);
@@ -154,11 +158,11 @@ export default class DistributedSyncPlugin extends Plugin {
     this.setupEngine();
   }
 
-  private updateStatus(status: "idle" | "syncing" | "conflict" | "error"): void {
+  private updateStatus(status: "idle" | "syncing" | "conflict" | "error", details?: string): void {
     if (!this.statusBarItem) return;
     switch (status) {
       case "syncing":
-        this.statusBarItem.setText("🔄 Syncing...");
+        this.statusBarItem.setText(details ? `🔄 Syncing (${details})...` : "🔄 Syncing...");
         break;
       case "conflict":
         this.statusBarItem.setText("⚠️ Sync conflict");

@@ -298,3 +298,95 @@ test("Scenario 10: Old device returns after months and catches up", async () => 
   assert.equal(await devOld.vault.read("OldNote.md"), "Updated in October");
   assert.equal(await devOld.vault.read("Note-20.md"), "Content revision 20");
 });
+
+test("Scenario 11: Pre-existing vault initial push to empty server", async () => {
+  const server = await createTestServer();
+  const token1 = await server.mintToken("device-1");
+  const token2 = await server.mintToken("device-2");
+
+  const dev1 = createTestDevice(server, "laptop", token1);
+  const dev2 = createTestDevice(server, "mobile", token2);
+
+  // Simulate pre-existing vault on dev1: write 20 files directly to vault without indexing
+  for (let i = 1; i <= 20; i++) {
+    await dev1.vault.write(`Archive/Note-${i}.md`, `Pre-existing note ${i}`);
+  }
+  // Verify dev1 index is completely empty before sync
+  assert.equal(dev1.index.allEntries().length, 0);
+
+  // Initial sync: dev1 scans vault, indexes all 20 files, and pushes to server
+  const res1 = await dev1.sync();
+  assert.equal(res1.pushed, 20);
+  assert.equal(res1.conflicts, 0);
+
+  // All 20 entries are now clean in dev1 index with base_rev = 1
+  for (let i = 1; i <= 20; i++) {
+    const entry = dev1.index.get(`Archive/Note-${i}.md`);
+    assert.ok(entry);
+    assert.equal(entry.dirty, false);
+    assert.equal(entry.base_rev, 1);
+  }
+
+  // Device 2 pulls all 20 files cleanly
+  const res2 = await dev2.sync();
+  assert.equal(res2.pulled, 20);
+  assert.equal(await dev2.vault.read("Archive/Note-1.md"), "Pre-existing note 1");
+  assert.equal(await dev2.vault.read("Archive/Note-20.md"), "Pre-existing note 20");
+});
+
+test("Scenario 12: Second device joins with identical pre-existing vault (fast hash deduplication)", async () => {
+  const server = await createTestServer();
+  const token1 = await server.mintToken("device-1");
+  const token2 = await server.mintToken("device-2");
+
+  const dev1 = createTestDevice(server, "laptop", token1);
+  const dev2 = createTestDevice(server, "tablet", token2);
+
+  // Dev 1 creates and pushes a note
+  await dev1.edit("Shared/Doc.md", "Shared documentation text");
+  await dev1.sync();
+
+  // Dev 2 ALREADY has the exact same file on disk (e.g. copied via USB/airdrop), but empty index
+  await dev2.vault.write("Shared/Doc.md", "Shared documentation text");
+  assert.equal(dev2.index.get("Shared/Doc.md"), undefined);
+
+  // Dev 2 syncs: hashes match, so it links rev without pushing or conflicting
+  const res2 = await dev2.sync();
+  assert.equal(res2.conflicts, 0);
+  assert.equal(res2.pushed, 0);
+
+  const entry = dev2.index.get("Shared/Doc.md");
+  assert.ok(entry);
+  assert.equal(entry.dirty, false);
+  assert.equal(entry.base_rev, 1);
+});
+
+test("Scenario 13: Second device joins with differing pre-existing file (safe conflict branching, zero data loss)", async () => {
+  const server = await createTestServer();
+  const token1 = await server.mintToken("device-1");
+  const token2 = await server.mintToken("device-2");
+
+  const dev1 = createTestDevice(server, "laptop", token1);
+  const dev2 = createTestDevice(server, "phone", token2);
+
+  // Dev 1 creates and pushes note
+  await dev1.edit("Notes/Project.md", "Project Roadmap from Laptop");
+  await dev1.sync();
+
+  // Dev 2 ALREADY has the same path on disk with different content, untracked
+  await dev2.vault.write("Notes/Project.md", "Project Notes drafted offline on Phone");
+
+  // Dev 2 syncs: mismatch with no common ancestor -> conflict copy created, local preserved
+  const res2 = await dev2.sync();
+  assert.equal(res2.conflicts, 1);
+
+  // Dev 2's local note is NOT overwritten
+  assert.equal(await dev2.vault.read("Notes/Project.md"), "Project Notes drafted offline on Phone");
+
+  // Conflict copy from laptop was created
+  assert.equal(dev2.conflicts.length, 1);
+  const conflictPath = dev2.conflicts[0].conflict;
+  assert.match(conflictPath, /Notes\/Project \(conflict laptop \d{4}-\d{2}-\d{2} \d{2}\.\d{2}\)\.md/);
+  assert.equal(await dev2.vault.exists(conflictPath), true);
+  assert.equal(await dev2.vault.read(conflictPath), "Project Roadmap from Laptop");
+});

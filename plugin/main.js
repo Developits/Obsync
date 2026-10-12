@@ -598,6 +598,7 @@ var SyncEngine = class {
   excludes;
   onConflict;
   onLog;
+  onProgress;
   constructor(opts) {
     this.adapter = opts.adapter;
     this.index = opts.index;
@@ -606,6 +607,7 @@ var SyncEngine = class {
     this.excludes = opts.excludes || [];
     this.onConflict = opts.onConflict;
     this.onLog = opts.onLog;
+    this.onProgress = opts.onProgress;
   }
   log(msg) {
     if (this.onLog) this.onLog(msg);
@@ -620,6 +622,37 @@ var SyncEngine = class {
     let pulledCount = 0;
     let pushedCount = 0;
     let conflictCount = 0;
+    if (this.adapter.listFiles) {
+      const diskPaths = await this.adapter.listFiles();
+      const diskSet = /* @__PURE__ */ new Set();
+      for (const p of diskPaths) {
+        const norm = normalizePath(p);
+        if (isIgnored(norm, this.excludes)) continue;
+        diskSet.add(norm);
+        const known = this.index.get(norm);
+        if (!known) {
+          const stat = await this.adapter.stat(norm);
+          this.index.set(norm, {
+            base_rev: 0,
+            base_hash: "",
+            local_hash: "",
+            mtime: stat?.mtime ?? Date.now(),
+            dirty: true
+          });
+        } else if (!known.dirty) {
+          const stat = await this.adapter.stat(norm);
+          if (stat && known.mtime && stat.mtime > known.mtime + 1e3) {
+            this.index.set(norm, { ...known, dirty: true, mtime: stat.mtime });
+          }
+        }
+      }
+      for (const [path, state] of this.index.allEntries()) {
+        if (isIgnored(path, this.excludes)) continue;
+        if (!diskSet.has(path) && state.base_rev > 0 && !state.dirty) {
+          this.index.set(path, { ...state, dirty: true });
+        }
+      }
+    }
     const initialSeq = this.index.getSeq();
     let hasMore = true;
     let currentSeq = initialSeq;
@@ -659,9 +692,19 @@ var SyncEngine = class {
         }
       }
     }
-    for (const [path, state] of this.index.allEntries()) {
-      if (isIgnored(path, this.excludes)) continue;
-      if (!state.dirty) continue;
+    const dirtyEntries = Array.from(this.index.allEntries()).filter(
+      ([path, state]) => state.dirty && !isIgnored(path, this.excludes)
+    );
+    const totalDirty = dirtyEntries.length;
+    let dirtyProgressIndex = 0;
+    for (const [path, state] of dirtyEntries) {
+      dirtyProgressIndex++;
+      if (this.onProgress) {
+        this.onProgress(dirtyProgressIndex, totalDirty, path);
+      }
+      if (dirtyProgressIndex % 10 === 0) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
       const fileExists = await this.adapter.exists(path);
       if (!fileExists) {
         try {
@@ -982,7 +1025,8 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
       stat: async (path) => {
         const s = await this.app.vault.adapter.stat(path);
         return s ? { mtime: s.mtime, size: s.size } : null;
-      }
+      },
+      listFiles: async () => this.app.vault.getFiles().map((f) => f.path)
     };
     this.engine = new SyncEngine({
       adapter: vaultAdapter,
@@ -993,6 +1037,9 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
       onConflict: (orig, conflict) => {
         new import_obsidian2.Notice(`Sync conflict on ${orig}. Saved remote version to ${conflict}`, 8e3);
         this.updateStatus("conflict");
+      },
+      onProgress: (current, total) => {
+        this.updateStatus("syncing", `${current}/${total}`);
       },
       onLog: (msg) => {
         console.log(`[DistributedSync] ${msg}`);
@@ -1009,11 +1056,11 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
     await this.saveData(this.settings);
     this.setupEngine();
   }
-  updateStatus(status) {
+  updateStatus(status, details) {
     if (!this.statusBarItem) return;
     switch (status) {
       case "syncing":
-        this.statusBarItem.setText("\u{1F504} Syncing...");
+        this.statusBarItem.setText(details ? `\u{1F504} Syncing (${details})...` : "\u{1F504} Syncing...");
         break;
       case "conflict":
         this.statusBarItem.setText("\u26A0\uFE0F Sync conflict");
