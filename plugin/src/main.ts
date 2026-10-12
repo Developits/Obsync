@@ -141,6 +141,10 @@ export default class DistributedSyncPlugin extends Plugin {
     });
   }
 
+  getClient(): SyncClient {
+    return this.client;
+  }
+
   async loadSettings(): Promise<void> {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
   }

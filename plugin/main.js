@@ -405,6 +405,30 @@ var DistributedSyncSettingTab = class extends import_obsidian.PluginSettingTab {
         }
       })
     );
+    containerEl.createEl("h3", { text: "Add Another Device" });
+    let newDeviceName = "Tablet";
+    new import_obsidian.Setting(containerEl).setName("New Device Name").setDesc("Generate an authenticated token for your phone, tablet, or another computer").addText(
+      (text) => text.setPlaceholder("Tablet").setValue(newDeviceName).onChange((val) => {
+        newDeviceName = val.trim();
+      })
+    ).addButton(
+      (btn) => btn.setButtonText("Generate Token").setCta().onClick(async () => {
+        if (!this.plugin.settings.token) {
+          new import_obsidian.Notice("Cannot mint token: this device is not connected yet.");
+          return;
+        }
+        try {
+          btn.setDisabled(true);
+          const res = await this.plugin.getClient().issueToken(newDeviceName || "NewDevice");
+          await navigator.clipboard.writeText(res.token);
+          new import_obsidian.Notice(`Token for "${newDeviceName}" generated and copied to clipboard! Paste it on your other device.`, 12e3);
+        } catch (e) {
+          new import_obsidian.Notice(`Failed to generate token: ${e}`);
+        } finally {
+          btn.setDisabled(false);
+        }
+      })
+    );
   }
 };
 
@@ -974,6 +998,9 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
         console.log(`[DistributedSync] ${msg}`);
       }
     });
+  }
+  getClient() {
+    return this.client;
   }
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
