@@ -1,0 +1,9 @@
+{
+  "id": "obsidian-distributed-sync",
+  "name": "Distributed Sync",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "Distributed, conflict-safe synchronization for Obsidian vaults via Cloudflare Worker, D1 and R2.",
+  "author": "Nahid",
+  "isDesktopOnly": false
+}

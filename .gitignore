@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.wrangler/
+.index/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db
