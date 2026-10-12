@@ -6,6 +6,7 @@
   "description": "Distributed Obsidian Sync System with Cloudflare Worker + D1 + R2",
   "scripts": {
     "build": "cd plugin && npm run build",
+    "package": "node scripts/package.mjs",
     "check": "npm --prefix server run check && npm --prefix plugin run check",
     "test": "node --experimental-strip-types test/sync.test.mjs"
   }
