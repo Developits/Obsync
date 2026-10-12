@@ -1,7 +1,7 @@
 // Obsidian plugin entrypoint.
 // Connects vault filesystem events, status bar UI, commands, and scheduled sync cycles.
 
-import { Notice, Plugin, TAbstractFile, TFile } from "obsidian";
+import { Notice, Plugin, TAbstractFile, TFile, requestUrl } from "obsidian";
 import { SyncClient } from "./api";
 import { LocalIndex, type StorageAdapter } from "./index-store";
 import { isIgnored, normalizePath } from "./paths";
@@ -106,7 +106,8 @@ export default class DistributedSyncPlugin extends Plugin {
     this.client = new SyncClient(
       this.settings.serverUrl,
       this.settings.token,
-      this.settings.deviceName
+      this.settings.deviceName,
+      requestUrl
     );
 
     const vaultAdapter: VaultAdapter = {

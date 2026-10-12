@@ -74,15 +74,35 @@ interface HttpResponse {
   arrayBuffer: () => Promise<ArrayBuffer>;
 }
 
+export type RequestUrlFn = (params: {
+  url: string;
+  method?: string;
+  body?: string | ArrayBuffer;
+  headers?: Record<string, string>;
+  throw?: boolean;
+}) => Promise<{
+  status: number;
+  headers: Record<string, string>;
+  json: any;
+  arrayBuffer: ArrayBuffer;
+}>;
+
 export class SyncClient {
   private baseUrl: string;
   private token: string;
   private deviceName: string;
+  private requestUrlFn?: RequestUrlFn;
 
-  constructor(baseUrl: string, token: string, deviceName = "") {
+  constructor(
+    baseUrl: string,
+    token: string,
+    deviceName = "",
+    requestUrlFn?: RequestUrlFn
+  ) {
     this.baseUrl = baseUrl;
     this.token = token;
     this.deviceName = deviceName;
+    this.requestUrlFn = requestUrlFn;
   }
 
   private url(endpoint: string): string {
@@ -101,15 +121,16 @@ export class SyncClient {
       ...(opts.headers ?? {}),
     };
 
-    // Check if running inside Obsidian
-    let obsRequestUrl: any = null;
-    try {
-      const obsidian = await import("obsidian");
-      obsRequestUrl = obsidian.requestUrl;
-    } catch {}
+    // Use requestUrl if provided or available in Obsidian CommonJS environment
+    let reqFn = this.requestUrlFn;
+    if (!reqFn && typeof require !== "undefined") {
+      try {
+        reqFn = require("obsidian").requestUrl;
+      } catch {}
+    }
 
-    if (obsRequestUrl) {
-      const resp = await obsRequestUrl({
+    if (reqFn) {
+      const resp = await reqFn({
         url: fullUrl,
         method,
         body: opts.body,

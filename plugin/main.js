@@ -4,11 +4,9 @@ Distributed Obsidian Sync Plugin
 */
 
 "use strict";
-var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
-var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __export = (target, all) => {
   for (var name in all)
@@ -22,14 +20,6 @@ var __copyProps = (to, from, except, desc) => {
   }
   return to;
 };
-var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
-  // If the importer is in node compatibility mode or this is not an ESM
-  // file that has been converted to a CommonJS file using a Babel-
-  // compatible transform (i.e. "__esModule" has not been set), then set
-  // "default" to the CommonJS "module.exports" for node compatibility.
-  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
-  mod
-));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
 // src/main.ts
@@ -121,10 +111,12 @@ var SyncClient = class {
   baseUrl;
   token;
   deviceName;
-  constructor(baseUrl, token, deviceName = "") {
+  requestUrlFn;
+  constructor(baseUrl, token, deviceName = "", requestUrlFn) {
     this.baseUrl = baseUrl;
     this.token = token;
     this.deviceName = deviceName;
+    this.requestUrlFn = requestUrlFn;
   }
   url(endpoint) {
     return `${this.baseUrl.replace(/\/+$/, "")}/v1${endpoint}`;
@@ -136,14 +128,15 @@ var SyncClient = class {
       ...this.deviceName ? { "X-Device": this.deviceName } : {},
       ...opts.headers ?? {}
     };
-    let obsRequestUrl = null;
-    try {
-      const obsidian = await import("obsidian");
-      obsRequestUrl = obsidian.requestUrl;
-    } catch {
+    let reqFn = this.requestUrlFn;
+    if (!reqFn && typeof require !== "undefined") {
+      try {
+        reqFn = require("obsidian").requestUrl;
+      } catch {
+      }
     }
-    if (obsRequestUrl) {
-      const resp = await obsRequestUrl({
+    if (reqFn) {
+      const resp = await reqFn({
         url: fullUrl,
         method,
         body: opts.body,
@@ -949,7 +942,8 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
     this.client = new SyncClient(
       this.settings.serverUrl,
       this.settings.token,
-      this.settings.deviceName
+      this.settings.deviceName,
+      import_obsidian2.requestUrl
     );
     const vaultAdapter = {
       read: (path) => this.app.vault.adapter.read(path),

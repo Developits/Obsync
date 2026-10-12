@@ -8,7 +8,7 @@
     {
       "binding": "DB",
       "database_name": "obsidian-sync-db",
-      "database_id": "local"
+      "database_id": "4736be09-44e2-47a4-8503-be511faec993"
     }
   ],
   "r2_buckets": [
