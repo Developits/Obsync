@@ -187,7 +187,7 @@ export async function createTestServer() {
   const schemaPath = path.resolve("server/schema.sql");
   const db = createMockD1(schemaPath);
   const bucket = createMockR2();
-  const env = { DB: db, BUCKET: bucket };
+  const env = { DB: db, BUCKET: bucket, API_KEY: "test-only-bootstrap-fixture" };
 
   // Dispatch requests directly to worker.fetch
   async function dispatch(reqUrl, options = {}) {
@@ -198,7 +198,7 @@ export async function createTestServer() {
   // Mint bootstrap token
   const bootstrapResp = await dispatch("http://test.local/v1/tokens", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-Api-Key": env.API_KEY },
     body: JSON.stringify({ name: "admin" }),
   });
   const { token: adminToken } = await bootstrapResp.json();

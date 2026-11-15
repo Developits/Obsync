@@ -303,12 +303,8 @@ var LocalIndex = class {
   }
   async save() {
     if (!this.dirty) return;
-    try {
-      await this.adapter.write(this.storagePath, JSON.stringify(this.data, null, 2));
-      this.dirty = false;
-    } catch (e) {
-      console.error("Failed to persist sync index:", e);
-    }
+    await this.adapter.write(this.storagePath, JSON.stringify(this.data, null, 2));
+    this.dirty = false;
   }
   getSeq() {
     return this.data.last_seq;
@@ -599,6 +595,7 @@ var SyncEngine = class {
   onConflict;
   onLog;
   onProgress;
+  scanFailures = /* @__PURE__ */ new Set();
   constructor(opts) {
     this.adapter = opts.adapter;
     this.index = opts.index;
@@ -622,6 +619,12 @@ var SyncEngine = class {
     let pulledCount = 0;
     let pushedCount = 0;
     let conflictCount = 0;
+    const errors = [];
+    this.scanFailures.clear();
+    const messageOf = (err) => err instanceof Error ? err.message : String(err);
+    for (const [path, state] of this.index.allEntries()) {
+      if (state.folder) this.index.remove(path);
+    }
     if (this.adapter.listFiles) {
       const diskPaths = await this.adapter.listFiles();
       const diskSet = /* @__PURE__ */ new Set();
@@ -629,21 +632,32 @@ var SyncEngine = class {
         const norm = normalizePath(p);
         if (isIgnored(norm, this.excludes)) continue;
         diskSet.add(norm);
-        const known = this.index.get(norm);
-        if (!known) {
-          const stat = await this.adapter.stat(norm);
-          this.index.set(norm, {
-            base_rev: 0,
-            base_hash: "",
-            local_hash: "",
-            mtime: stat?.mtime ?? Date.now(),
-            dirty: true
-          });
-        } else if (!known.dirty) {
-          const stat = await this.adapter.stat(norm);
-          if (stat && known.mtime && stat.mtime > known.mtime + 1e3) {
-            this.index.set(norm, { ...known, dirty: true, mtime: stat.mtime });
+        try {
+          const known = this.index.get(norm);
+          if (!known) {
+            const stat = await this.adapter.stat(norm);
+            this.index.set(norm, {
+              base_rev: 0,
+              base_hash: "",
+              local_hash: "",
+              mtime: stat?.mtime ?? Date.now(),
+              dirty: true
+            });
+          } else if (!known.dirty) {
+            const stat = await this.adapter.stat(norm);
+            const hash = await computeSha256(await this.adapter.readBinary(norm));
+            if (hash !== known.base_hash) {
+              this.index.set(norm, { ...known, dirty: true, local_hash: hash, mtime: stat?.mtime ?? Date.now() });
+            }
           }
+        } catch (err) {
+          this.scanFailures.add(norm);
+          if (!this.index.get(norm)) {
+            this.index.set(norm, { base_rev: 0, base_hash: "", local_hash: "", mtime: Date.now(), dirty: true });
+          } else {
+            this.index.set(norm, { ...this.index.get(norm), dirty: true });
+          }
+          errors.push({ path: norm, operation: "scan", message: messageOf(err) });
         }
       }
       for (const [path, state] of this.index.allEntries()) {
@@ -653,21 +667,37 @@ var SyncEngine = class {
         }
       }
     }
-    const initialSeq = this.index.getSeq();
-    let hasMore = true;
-    let currentSeq = initialSeq;
-    while (hasMore) {
-      const page = await this.client.changes(currentSeq, 500);
-      for (const entry of page.entries) {
-        const handled = await this.applyRemoteChange(entry);
-        if (handled.conflict) conflictCount++;
-        pulledCount++;
+    const pullChanges = async () => {
+      let hasMore = true;
+      while (hasMore) {
+        const startSeq = this.index.getSeq();
+        const page = await this.client.changes(startSeq, 500);
+        let contiguousSeq = startSeq;
+        let blocked = false;
+        for (const entry of page.entries) {
+          try {
+            const handled = await this.applyRemoteChange(entry);
+            if (handled.conflict) conflictCount++;
+            if (handled.failed) {
+              blocked = true;
+              errors.push({ path: normalizePath(entry.path), operation: "pull", message: "path has unreadable local content" });
+            } else {
+              pulledCount++;
+              if (!blocked) contiguousSeq = entry.seq;
+            }
+          } catch (err) {
+            blocked = true;
+            errors.push({ path: normalizePath(entry.path), operation: "pull", message: messageOf(err) });
+          }
+        }
+        this.index.setSeq(contiguousSeq);
+        if (blocked) break;
+        hasMore = page.has_more;
+        if (page.entries.length === 0) break;
+        if (page.next_seq <= startSeq) break;
       }
-      currentSeq = page.next_seq;
-      this.index.setSeq(currentSeq);
-      hasMore = page.has_more;
-      if (page.entries.length === 0) break;
-    }
+    };
+    await pullChanges();
     const queuedRenames = this.index.getQueuedRenames();
     for (const rename of queuedRenames) {
       try {
@@ -678,15 +708,50 @@ var SyncEngine = class {
           this.index.set(rename.to, {
             ...known,
             base_rev: res.rev,
-            dirty: false
+            base_hash: res.hash,
+            // The acknowledged revision belongs to the destination path;
+            // the old source path is no longer a valid merge base pair.
+            base_path: void 0,
+            // A rename acknowledges metadata, not pending local content.
+            dirty: known.dirty ?? false
           });
         }
-        this.index.remove(rename.from);
-        this.index.setSeq(res.seq);
+        const sourceNow = this.index.get(rename.from);
+        if (sourceNow && sourceNow.base_rev === rename.base_rev) {
+          this.index.remove(rename.from);
+        }
         pushedCount++;
       } catch (err) {
-        if (err instanceof ConflictError) {
-          this.log(`Rename conflict on ${rename.from} -> ${rename.to}`);
+        let missingSource = false;
+        try {
+          await this.client.getFile(rename.from);
+        } catch (probe) {
+          missingSource = probe instanceof ApiError && probe.status === 404;
+        }
+        if ((err instanceof ConflictError || missingSource) && await this.adapter.exists(rename.to)) {
+          let destination;
+          try {
+            destination = await this.client.getFile(rename.to);
+          } catch (probe) {
+            if (!(probe instanceof ApiError && probe.status === 404)) throw probe;
+          }
+          if (destination) {
+            const copy = await this.preserveConflict(rename.to, "remote", destination.data);
+            this.onConflict?.(rename.to, copy);
+          } else {
+            this.onConflict?.(rename.from, rename.to);
+          }
+          const known = this.index.get(rename.to);
+          this.index.set(rename.to, {
+            ...known,
+            base_rev: destination?.rev ?? 0,
+            base_hash: destination?.hash ?? "",
+            local_hash: "",
+            mtime: Date.now(),
+            dirty: true
+          });
+          this.index.clearQueuedRename(rename.from);
+          conflictCount++;
         } else {
           this.log(`Failed to push rename: ${err}`);
         }
@@ -705,61 +770,116 @@ var SyncEngine = class {
       if (dirtyProgressIndex % 10 === 0) {
         await new Promise((r) => setTimeout(r, 0));
       }
-      const fileExists = await this.adapter.exists(path);
-      if (!fileExists) {
-        try {
-          const res = await this.client.deleteFile(path, state.base_rev);
-          this.index.remove(path);
-          this.index.setSeq(res.seq);
-          pushedCount++;
-        } catch (err) {
-          if (err instanceof ConflictError) {
-            await this.reconcileRemoteEdit(path, err.serverRev);
-          } else {
-            this.log(`Failed to push deletion of ${path}: ${err}`);
+      try {
+        if (this.scanFailures.has(path)) continue;
+        const fileExists = await this.adapter.exists(path);
+        if (!fileExists) {
+          try {
+            const res = await this.client.deleteFile(path, state.base_rev);
+            this.index.remove(path);
+            pushedCount++;
+          } catch (err) {
+            if (err instanceof ConflictError) {
+              await this.reconcileRemoteEdit(path, err.serverRev);
+            } else {
+              errors.push({ path, operation: "push", message: messageOf(err) });
+              this.log(`Failed to push deletion of ${path}: ${err}`);
+            }
+          }
+        } else {
+          const data = await this.adapter.readBinary(path);
+          if (data.byteLength > 100 * 1024 * 1024) {
+            errors.push({ path, operation: "push", message: "file exceeds 100MB limit" });
+            this.log(`Skipping ${path}: file exceeds 100MB limit`);
+            continue;
+          }
+          const localHash = await computeSha256(data);
+          if (localHash === state.base_hash && state.base_rev > 0) {
+            this.index.set(path, { ...state, dirty: false });
+            continue;
+          }
+          const stat = await this.adapter.stat(path);
+          const mtime = stat?.mtime ?? Date.now();
+          try {
+            const res = await this.client.putFile(path, state.base_rev, data, mtime);
+            await this.acknowledgeUpload(path, res.rev, res.hash, mtime);
+            pushedCount++;
+          } catch (err) {
+            if (err instanceof ConflictError) {
+              try {
+                const hadConflict = await this.reconcileConflict(path, state, data, err);
+                if (hadConflict) conflictCount++;
+              } catch (reconcileErr) {
+                errors.push({ path, operation: "push", message: messageOf(reconcileErr) });
+              }
+            } else {
+              errors.push({ path, operation: "push", message: messageOf(err) });
+              this.log(`Failed to push edit for ${path}: ${err}`);
+            }
           }
         }
-      } else {
-        const data = await this.adapter.readBinary(path);
-        if (data.byteLength > 100 * 1024 * 1024) {
-          this.log(`Skipping ${path}: file exceeds 100MB limit`);
-          continue;
-        }
-        const localHash = await computeSha256(data);
-        if (localHash === state.base_hash && state.base_rev > 0) {
-          this.index.set(path, { ...state, dirty: false });
-          continue;
-        }
-        const stat = await this.adapter.stat(path);
-        const mtime = stat?.mtime ?? Date.now();
-        try {
-          const res = await this.client.putFile(path, state.base_rev, data, mtime);
-          this.index.set(path, {
-            base_rev: res.rev,
-            base_hash: res.hash,
-            local_hash: res.hash,
-            mtime,
-            dirty: false
-          });
-          this.index.setSeq(res.seq);
-          pushedCount++;
-        } catch (err) {
-          if (err instanceof ConflictError) {
-            const hadConflict = await this.reconcileConflict(path, state, data, err);
-            if (hadConflict) conflictCount++;
-          } else {
-            this.log(`Failed to push edit for ${path}: ${err}`);
-          }
-        }
+      } catch (err) {
+        errors.push({ path, operation: "push", message: messageOf(err) });
       }
     }
-    await this.index.save();
-    return { pulled: pulledCount, pushed: pushedCount, conflicts: conflictCount };
+    await pullChanges();
+    try {
+      await this.index.save();
+    } catch (err) {
+      errors.push({ path: "", operation: "save", message: messageOf(err) });
+      this.log(`Failed to persist sync index: ${err}`);
+    }
+    let pending = 0;
+    for (const [path, state] of this.index.allEntries()) {
+      if (state.dirty && !isIgnored(path, this.excludes) && !this.scanFailures.has(path)) pending++;
+    }
+    pending += this.index.getQueuedRenames().length;
+    pending += this.scanFailures.size;
+    return {
+      pulled: pulledCount,
+      pushed: pushedCount,
+      conflicts: conflictCount,
+      failed: errors.length,
+      pending,
+      errors
+    };
+  }
+  async acknowledgeUpload(path, rev, hash, mtime) {
+    const rename = this.index.getQueuedRenames().find((r) => r.from === path);
+    const target = rename?.to ?? path;
+    if (rename) this.index.queueRename({ ...rename, base_rev: rev });
+    const before = this.index.get(target);
+    const exists = await this.adapter.exists(target);
+    const localHash = exists ? await computeSha256(await this.adapter.readBinary(target)) : "";
+    const current = this.index.get(target);
+    this.index.set(target, {
+      ...current,
+      base_rev: rev,
+      base_hash: hash,
+      base_path: void 0,
+      local_hash: localHash,
+      mtime,
+      dirty: !exists || localHash !== hash || before !== current
+    });
   }
   async applyRemoteChange(entry) {
     const path = normalizePath(entry.path);
-    if (isIgnored(path, this.excludes)) {
+    if (isIgnored(path, this.excludes) || entry.folder) {
       return { conflict: false };
+    }
+    if (this.scanFailures.has(path)) {
+      return { conflict: false, failed: true };
+    }
+    if (entry.renamed_from && !this.index.get(path)) {
+      const source = normalizePath(entry.renamed_from);
+      const previous = this.index.get(source);
+      const provenLineage = previous !== void 0 && previous.base_rev > 0 && Boolean(previous.base_hash) && Boolean(entry.hash) && previous.base_hash === entry.hash;
+      if (provenLineage && !this.scanFailures.has(source) && !isIgnored(source, this.excludes) && await this.adapter.exists(source) && !await this.adapter.exists(path)) {
+        await this.ensureParentDir(path);
+        await this.adapter.rename(source, path);
+        this.index.remove(source);
+        this.index.set(path, { ...previous, base_path: source });
+      }
     }
     const known = this.index.get(path);
     if (entry.updated_by === this.deviceName && known && known.base_rev === entry.rev) {
@@ -767,23 +887,61 @@ var SyncEngine = class {
     }
     const fileExists = await this.adapter.exists(path);
     if (entry.deleted) {
+      if (known && known.base_rev > entry.rev) {
+        return { conflict: false };
+      }
       if (known?.dirty && fileExists) {
         this.log(`Edit beats deletion: keeping locally edited ${path}`);
         this.index.set(path, {
           ...known,
           base_rev: entry.rev,
+          // The base revision is a tombstone: the preserved bytes are no
+          // longer the server's content, so force a real upload/revival.
+          base_hash: "",
+          base_path: void 0,
           dirty: true
         });
         return { conflict: false };
       }
       if (fileExists) {
+        const sameIdentity = known !== void 0 && known.base_rev > 0 && known.base_rev === entry.rev - 1 && !known.dirty;
+        if (!sameIdentity) {
+          this.log(`Keeping untracked/divergent local bytes at tombstoned path ${path}`);
+          this.index.set(path, {
+            ...known ?? { base_rev: 0, base_hash: "", local_hash: "", mtime: Date.now() },
+            base_rev: entry.rev,
+            base_hash: "",
+            base_path: void 0,
+            dirty: true
+          });
+          return { conflict: false };
+        }
+        const currentHash = await computeSha256(await this.adapter.readBinary(path));
+        if (known.base_hash && currentHash !== known.base_hash) {
+          this.index.set(path, { ...known, base_rev: entry.rev, base_hash: "", base_path: void 0, dirty: true });
+          return { conflict: false };
+        }
         await this.adapter.remove(path);
       }
       this.index.remove(path);
       return { conflict: false };
     }
-    if (!known?.dirty) {
+    if (!known?.dirty || !fileExists) {
+      const snapshot = fileExists ? await computeSha256(await this.adapter.readBinary(path)) : null;
       const remote = await this.client.getFile(path, entry.rev);
+      const current = await this.localHashOrNull(path);
+      if (current !== snapshot) {
+        this.log(`Local content changed while downloading ${path}; preserving both versions`);
+        const copy = await this.preserveConflict(path, entry.updated_by || "remote", remote.data);
+        this.onConflict?.(path, copy);
+        this.index.set(path, {
+          ...known ?? { base_rev: 0, base_hash: "", local_hash: "", mtime: Date.now() },
+          base_rev: entry.rev,
+          base_path: void 0,
+          dirty: true
+        });
+        return { conflict: true };
+      }
       await this.ensureParentDir(path);
       await this.adapter.writeBinary(path, remote.data);
       this.index.set(path, {
@@ -811,7 +969,7 @@ var SyncEngine = class {
     if (isMarkdown && known.base_rev > 0) {
       try {
         const [baseFile, remoteFile2] = await Promise.all([
-          this.client.getFile(path, known.base_rev),
+          this.client.getFile(known.base_path ?? path, known.base_rev),
           this.client.getFile(path, entry.rev)
         ]);
         const decoder = new TextDecoder();
@@ -820,6 +978,19 @@ var SyncEngine = class {
         const localText = decoder.decode(localData);
         const merged = merge3(baseText, localText, remoteText, this.deviceName, entry.updated_by || "remote");
         if (merged.clean) {
+          const currentHash = await this.localHashOrNull(path);
+          if (currentHash !== localHash) {
+            this.log(`Local content changed during merge of ${path}; deferring to a later sync`);
+            const copy = await this.preserveConflict(path, entry.updated_by || "remote", remoteFile2.data);
+            this.onConflict?.(path, copy);
+            this.index.set(path, {
+              ...known,
+              base_rev: entry.rev,
+              base_path: void 0,
+              dirty: true
+            });
+            return { conflict: true };
+          }
           await this.adapter.write(path, merged.text);
           const newHash = await computeSha256(new TextEncoder().encode(merged.text).buffer);
           this.index.set(path, {
@@ -837,9 +1008,7 @@ var SyncEngine = class {
       }
     }
     const remoteFile = await this.client.getFile(path, entry.rev);
-    const conflictPath = generateConflictPath(path, entry.updated_by || "remote");
-    await this.ensureParentDir(conflictPath);
-    await this.adapter.writeBinary(conflictPath, remoteFile.data);
+    const conflictPath = await this.preserveConflict(path, entry.updated_by || "remote", remoteFile.data);
     if (this.onConflict) {
       this.onConflict(path, conflictPath);
     }
@@ -847,16 +1016,18 @@ var SyncEngine = class {
     this.index.set(path, {
       ...known,
       base_rev: entry.rev,
+      base_path: void 0,
       dirty: true
     });
     return { conflict: true };
   }
   async reconcileConflict(path, state, localData, conflict) {
+    const localHash = await computeSha256(localData);
     const isMarkdown = path.endsWith(".md");
     if (isMarkdown && state.base_rev > 0 && !conflict.deleted) {
       try {
         const [baseFile, serverFile2] = await Promise.all([
-          this.client.getFile(path, state.base_rev),
+          this.client.getFile(state.base_path ?? path, state.base_rev),
           this.client.getFile(path, conflict.serverRev)
         ]);
         const decoder = new TextDecoder();
@@ -865,6 +1036,19 @@ var SyncEngine = class {
         const localText = decoder.decode(localData);
         const merged = merge3(baseText, localText, serverText, this.deviceName, conflict.serverDevice || "remote");
         if (merged.clean) {
+          const currentHash = await this.localHashOrNull(path);
+          if (currentHash !== localHash) {
+            this.log(`Local content changed during merge of ${path}; preserving remote copy`);
+            const copy = await this.preserveConflict(path, conflict.serverDevice || "remote", serverFile2.data);
+            this.onConflict?.(path, copy);
+            this.index.set(path, {
+              ...state,
+              base_rev: conflict.serverRev,
+              base_path: void 0,
+              dirty: true
+            });
+            return true;
+          }
           await this.adapter.write(path, merged.text);
           const newHash = await computeSha256(new TextEncoder().encode(merged.text).buffer);
           this.index.set(path, {
@@ -891,7 +1075,6 @@ var SyncEngine = class {
           mtime,
           dirty: false
         });
-        this.index.setSeq(res.seq);
         this.log(`Edit beats deletion: revived ${path} on server`);
         return false;
       } catch (e) {
@@ -899,19 +1082,31 @@ var SyncEngine = class {
       }
     }
     const serverFile = await this.client.getFile(path, conflict.serverRev);
-    const conflictPath = generateConflictPath(path, conflict.serverDevice || "remote");
-    await this.ensureParentDir(conflictPath);
-    await this.adapter.writeBinary(conflictPath, serverFile.data);
+    const conflictPath = await this.preserveConflict(path, conflict.serverDevice || "remote", serverFile.data);
     if (this.onConflict) this.onConflict(path, conflictPath);
     this.index.set(path, {
       ...state,
       base_rev: conflict.serverRev,
+      base_path: void 0,
       dirty: true
     });
     return true;
   }
   async reconcileRemoteEdit(path, serverRev) {
     const remote = await this.client.getFile(path, serverRev);
+    const existing = await this.localHashOrNull(path);
+    if (existing !== null) {
+      const copy = await this.preserveConflict(path, "remote", remote.data);
+      this.onConflict?.(path, copy);
+      const known = this.index.get(path);
+      this.index.set(path, {
+        ...known ?? { base_rev: 0, base_hash: "", local_hash: "", mtime: Date.now() },
+        base_rev: serverRev,
+        base_path: void 0,
+        dirty: true
+      });
+      return;
+    }
     await this.ensureParentDir(path);
     await this.adapter.writeBinary(path, remote.data);
     this.index.set(path, {
@@ -922,12 +1117,46 @@ var SyncEngine = class {
       dirty: false
     });
   }
+  conflictReservations = /* @__PURE__ */ new Set();
+  async preserveConflict(path, device, data) {
+    const base = generateConflictPath(path, device);
+    const dot = base.lastIndexOf(".");
+    const split = dot > base.lastIndexOf("/") ? dot : base.length;
+    for (let n = 1; ; n++) {
+      const candidate = n === 1 ? base : `${base.slice(0, split)} (${n})${base.slice(split)}`;
+      if (this.conflictReservations.has(candidate)) continue;
+      this.conflictReservations.add(candidate);
+      try {
+        if (await this.adapter.exists(candidate)) continue;
+        await this.ensureParentDir(candidate);
+        if (this.adapter.createBinary) {
+          try {
+            await this.adapter.createBinary(candidate, data);
+          } catch (err) {
+            if (await this.adapter.exists(candidate)) continue;
+            throw err;
+          }
+        } else {
+          await this.adapter.writeBinary(candidate, data);
+        }
+        this.index.set(candidate, { base_rev: 0, base_hash: "", local_hash: "", mtime: Date.now(), dirty: true });
+        return candidate;
+      } finally {
+        this.conflictReservations.delete(candidate);
+      }
+    }
+  }
   async ensureParentDir(path) {
     const lastSlash = path.lastIndexOf("/");
     if (lastSlash !== -1) {
       const dir = path.slice(0, lastSlash);
-      await this.adapter.mkdir(dir);
+      if (!await this.adapter.exists(dir)) await this.adapter.mkdir(dir);
     }
+  }
+  /** Hash of the current on-disk bytes, or null when the path is absent. */
+  async localHashOrNull(path) {
+    if (!await this.adapter.exists(path)) return null;
+    return computeSha256(await this.adapter.readBinary(path));
   }
 };
 
@@ -940,6 +1169,8 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
   statusBarItem;
   isSyncing = false;
   debounceTimer = null;
+  syncTimer = null;
+  startupTimer = null;
   async onload() {
     await this.loadSettings();
     const storageAdapter = {
@@ -995,16 +1226,7 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
     this.registerEvent(this.app.vault.on("modify", (file) => this.onFileModified(file)));
     this.registerEvent(this.app.vault.on("delete", (file) => this.onFileDeleted(file)));
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => this.onFileRenamed(file, oldPath)));
-    this.registerInterval(
-      window.setInterval(() => {
-        if (this.settings.autoSync) {
-          this.triggerSync(false);
-        }
-      }, Math.max(this.settings.syncIntervalSeconds, 5) * 1e3)
-    );
-    if (this.settings.token) {
-      setTimeout(() => this.triggerSync(false), 1500);
-    }
+    this.setupAutoSync();
   }
   setupEngine() {
     this.client = new SyncClient(
@@ -1018,6 +1240,11 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
       readBinary: (path) => this.app.vault.adapter.readBinary(path),
       write: (path, text) => this.app.vault.adapter.write(path, text),
       writeBinary: (path, data) => this.app.vault.adapter.writeBinary(path, data),
+      // Use the Vault API to notify Obsidian of new artifacts; the engine
+      // separately reserves candidate names before awaiting filesystem I/O.
+      createBinary: async (path, data) => {
+        await this.app.vault.createBinary(path, data);
+      },
       remove: (path) => this.app.vault.adapter.remove(path),
       rename: (from, to) => this.app.vault.adapter.rename(from, to),
       exists: (path) => this.app.vault.adapter.exists(path),
@@ -1055,6 +1282,44 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
   async saveSettings() {
     await this.saveData(this.settings);
     this.setupEngine();
+    this.setupAutoSync();
+  }
+  setupAutoSync() {
+    this.clearAutoSync();
+    if (!this.settings.token || !this.settings.autoSync) return;
+    this.syncTimer = window.setInterval(() => {
+      if (this.settings.autoSync && this.settings.token) this.triggerSync(false);
+    }, Math.max(this.settings.syncIntervalSeconds, 5) * 1e3);
+    this.registerInterval(this.syncTimer);
+    this.startupTimer = window.setTimeout(() => {
+      this.startupTimer = null;
+      this.triggerSync(false);
+    }, 1500);
+    if (this.register) {
+      this.register(() => {
+        if (this.startupTimer !== null) {
+          window.clearTimeout(this.startupTimer);
+          this.startupTimer = null;
+        }
+      });
+    }
+  }
+  clearAutoSync() {
+    if (this.syncTimer !== null) {
+      window.clearInterval(this.syncTimer);
+      this.syncTimer = null;
+    }
+    if (this.startupTimer !== null) {
+      window.clearTimeout(this.startupTimer);
+      this.startupTimer = null;
+    }
+  }
+  onunload() {
+    this.clearAutoSync();
+    if (this.debounceTimer !== null) {
+      window.clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
+    }
   }
   updateStatus(status, details) {
     if (!this.statusBarItem) return;
@@ -1063,10 +1328,13 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
         this.statusBarItem.setText(details ? `\u{1F504} Syncing (${details})...` : "\u{1F504} Syncing...");
         break;
       case "conflict":
-        this.statusBarItem.setText("\u26A0\uFE0F Sync conflict");
+        this.statusBarItem.setText(details ? `\u26A0\uFE0F Sync conflict (${details})` : "\u26A0\uFE0F Sync conflict");
+        break;
+      case "pending":
+        this.statusBarItem.setText(`\u26A0\uFE0F ${details ?? "Sync pending"}`);
         break;
       case "error":
-        this.statusBarItem.setText("\u274C Sync error");
+        this.statusBarItem.setText(details ? `\u274C Sync error (${details})` : "\u274C Sync error");
         break;
       default:
         this.statusBarItem.setText("\u2713 Synced");
@@ -1083,15 +1351,21 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
     this.updateStatus("syncing");
     try {
       const res = await this.engine.sync();
-      if (res.conflicts > 0) {
+      if (res.failed > 0) {
+        this.updateStatus("error", `${res.failed} failed`);
+      } else if (res.conflicts > 0) {
         this.updateStatus("conflict");
+      } else if (res.pending > 0) {
+        this.updateStatus("pending", `${res.pending} pending`);
       } else {
         this.updateStatus("idle");
       }
       if (manual) {
-        new import_obsidian2.Notice(
-          `Sync complete: ${res.pulled} pulled, ${res.pushed} pushed${res.conflicts > 0 ? `, ${res.conflicts} conflicts` : ""}`
-        );
+        const parts = [`${res.pulled} pulled`, `${res.pushed} pushed`];
+        if (res.conflicts > 0) parts.push(`${res.conflicts} conflicts`);
+        if (res.failed > 0) parts.push(`${res.failed} failed`);
+        if (res.pending > 0) parts.push(`${res.pending} pending`);
+        new import_obsidian2.Notice(`Sync complete: ${parts.join(", ")}`);
       }
     } catch (e) {
       console.error("Sync error:", e);
@@ -1112,16 +1386,17 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
     }, 2e3);
   }
   onFileCreated(file) {
+    if (!(file instanceof import_obsidian2.TFile)) return;
     const path = normalizePath(file.path);
     if (isIgnored(path, this.settings.excludes)) return;
     const known = this.index.get(path);
     this.index.set(path, {
+      ...known,
       base_rev: known?.base_rev ?? 0,
       base_hash: known?.base_hash ?? "",
       local_hash: "",
       mtime: Date.now(),
-      dirty: true,
-      folder: !(file instanceof import_obsidian2.TFile)
+      dirty: true
     });
     this.scheduleDebouncedSync();
   }
@@ -1130,6 +1405,7 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
     if (isIgnored(path, this.settings.excludes)) return;
     const known = this.index.get(path);
     this.index.set(path, {
+      ...known,
       base_rev: known?.base_rev ?? 0,
       base_hash: known?.base_hash ?? "",
       local_hash: "",
@@ -1154,14 +1430,24 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
     const oldNorm = normalizePath(oldPath);
     const newNorm = normalizePath(file.path);
     if (isIgnored(oldNorm, this.settings.excludes) && isIgnored(newNorm, this.settings.excludes)) return;
-    const known = this.index.get(oldNorm);
-    if (known && known.base_rev > 0) {
-      this.index.queueRename({ from: oldNorm, to: newNorm, base_rev: known.base_rev });
-      this.index.set(newNorm, { ...known, dirty: known.dirty ?? false });
-      this.index.remove(oldNorm);
-    } else {
-      this.onFileCreated(file);
+    const paths = file instanceof import_obsidian2.TFile ? [oldNorm] : this.index.allEntries().map(([path]) => path).filter((path) => path.startsWith(oldNorm + "/"));
+    for (const oldFile of paths) {
+      const newFile = newNorm + oldFile.slice(oldNorm.length);
+      const known = this.index.get(oldFile);
+      if (isIgnored(oldFile, this.settings.excludes)) continue;
+      if (isIgnored(newFile, this.settings.excludes)) {
+        if (known) this.index.remove(oldFile);
+        continue;
+      }
+      if (known && known.base_rev > 0) {
+        this.index.queueRename({ from: oldFile, to: newFile, base_rev: known.base_rev });
+        this.index.set(newFile, { ...known, dirty: known.dirty ?? false });
+        this.index.remove(oldFile);
+      } else if (file instanceof import_obsidian2.TFile) {
+        this.onFileCreated(file);
+      }
     }
+    if (isIgnored(oldNorm, this.settings.excludes) && file instanceof import_obsidian2.TFile) this.onFileCreated(file);
     this.scheduleDebouncedSync();
   }
 };

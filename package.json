@@ -1,6 +1,6 @@
 {
   "name": "obsidian-distributed-sync-monorepo",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "Distributed Obsidian Sync System with Cloudflare Worker + D1 + R2",
@@ -8,6 +8,7 @@
     "build": "cd plugin && npm run build",
     "package": "node scripts/package.mjs",
     "check": "npm --prefix server run check && npm --prefix plugin run check",
-    "test": "node --experimental-strip-types test/sync.test.mjs"
+    "test": "node --experimental-strip-types --test test/*.test.mjs",
+    "test:worker": "node test/workerd-smoke.mjs"
   }
 }

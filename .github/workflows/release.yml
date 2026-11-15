@@ -21,11 +21,17 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Install dependencies
         run: |
-          npm --prefix plugin ci
+          npm --prefix plugin ci --ignore-scripts
+          npm --prefix server ci --ignore-scripts
+
+      - name: Validate before releasing
+        run: |
+          npm run check
+          npm test
 
       - name: Package release assets
         run: |

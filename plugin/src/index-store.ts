@@ -2,6 +2,7 @@
 
 export interface FileState {
   base_rev: number;
+  base_path?: string;
   base_hash: string;
   local_hash: string;
   mtime: number;
@@ -61,12 +62,10 @@ export class LocalIndex {
 
   async save(): Promise<void> {
     if (!this.dirty) return;
-    try {
-      await this.adapter.write(this.storagePath, JSON.stringify(this.data, null, 2));
-      this.dirty = false;
-    } catch (e) {
-      console.error("Failed to persist sync index:", e);
-    }
+    // A failed write must reject: reporting success while the cursor/state was
+    // never persisted would silently re-pull or lose local intent.
+    await this.adapter.write(this.storagePath, JSON.stringify(this.data, null, 2));
+    this.dirty = false;
   }
 
   getSeq(): number {

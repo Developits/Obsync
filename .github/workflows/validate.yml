@@ -1,0 +1,33 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install locked development dependencies
+        run: |
+          npm --prefix plugin ci --ignore-scripts
+          npm --prefix server ci --ignore-scripts
+      - name: Typecheck, build, and run all regressions
+        run: |
+          npm run check
+          npm run build
+          npm test
+      - name: Audit locked tooling dependencies
+        run: |
+          npm --prefix plugin audit
+          npm --prefix server audit
+      - name: Package verified plugin
+        run: npm run package

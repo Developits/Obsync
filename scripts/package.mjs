@@ -1,9 +1,10 @@
 // Release packaging script for Obsidian Distributed Sync plugin.
-// Pure Node standard library + native tar - zero external dependencies.
+// Pure Node standard library; works with GNU/Linux, macOS and Windows.
 
 import fs from "node:fs";
 import path from "node:path";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { makeZip } from "./zip.mjs";
 
 const rootDir = process.cwd();
 const pluginDir = path.join(rootDir, "plugin");
@@ -21,7 +22,7 @@ const pluginId = manifest.id;
 
 // 1. Build latest plugin bundle
 console.log("Building plugin bundle...");
-execSync("npm run build", { cwd: pluginDir, stdio: "inherit" });
+execFileSync(process.execPath, ["esbuild.config.mjs"], { cwd: pluginDir, stdio: "inherit" });
 
 // 2. Prepare clean dist directory
 if (fs.existsSync(distDir)) {
@@ -39,7 +40,7 @@ fs.copyFileSync(path.join(pluginDir, "manifest.json"), path.join(stageDir, "mani
 fs.copyFileSync(path.join(pluginDir, "main.js"), path.join(distDir, "main.js"));
 fs.copyFileSync(path.join(pluginDir, "manifest.json"), path.join(distDir, "manifest.json"));
 
-// 4. Create ZIPs using native cross-platform tar (bsdtar supports zip on Windows/macOS/Linux)
+// 4. Create deterministic ZIPs without platform-specific tar behavior.
 // Standard zip with folder (extract directly into .obsidian/plugins/)
 const versionedZip = `${pluginId}-v${version}.zip`;
 const genericZip = `${pluginId}.zip`;
@@ -51,11 +52,13 @@ const flatZip = `${pluginId}-flat.zip`;
 const flatZipPath = path.join(distDir, flatZip);
 
 console.log(`Packaging ${versionedZip}...`);
-execSync(`tar -a -c -f "${versionedZipPath}" "${pluginId}"`, { cwd: distDir, stdio: "inherit" });
+fs.writeFileSync(versionedZipPath, makeZip(["main.js", "manifest.json"].map((file) =>
+  [`${pluginId}/${file}`, fs.readFileSync(path.join(stageDir, file))])));
 fs.copyFileSync(versionedZipPath, genericZipPath);
 
 console.log(`Packaging ${flatZip}...`);
-execSync(`tar -a -c -f "${flatZipPath}" "main.js" "manifest.json"`, { cwd: stageDir, stdio: "inherit" });
+fs.writeFileSync(flatZipPath, makeZip(["main.js", "manifest.json"].map((file) =>
+  [file, fs.readFileSync(path.join(stageDir, file))])));
 
 console.log(`\nSuccessfully created release assets in dist/:`);
 console.log(`  - ${versionedZip} (${(fs.statSync(versionedZipPath).size / 1024).toFixed(1)} KB) [with folder]`);
