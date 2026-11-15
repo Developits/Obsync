@@ -7,3 +7,9 @@ yarn-debug.log*
 yarn-error.log*
 .DS_Store
 Thumbs.db
+.local-sync-test/
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+!.env.example

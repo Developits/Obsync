@@ -16,6 +16,8 @@ export default class DistributedSyncPlugin extends Plugin {
   private statusBarItem!: HTMLElement;
   private isSyncing = false;
   private debounceTimer: number | null = null;
+  private syncTimer: number | null = null;
+  private startupTimer: number | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -87,19 +89,9 @@ export default class DistributedSyncPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("delete", (file) => this.onFileDeleted(file)));
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => this.onFileRenamed(file, oldPath)));
 
-    // Register Polling Timer (default 30s)
-    this.registerInterval(
-      window.setInterval(() => {
-        if (this.settings.autoSync) {
-          this.triggerSync(false);
-        }
-      }, Math.max(this.settings.syncIntervalSeconds, 5) * 1000)
-    );
-
-    // Initial sync on startup
-    if (this.settings.token) {
-      setTimeout(() => this.triggerSync(false), 1500);
-    }
+    // Polling + startup sync are governed by autoSync and refreshed when
+    // settings change (see saveSettings).
+    this.setupAutoSync();
   }
 
   private setupEngine(): void {
@@ -115,6 +107,11 @@ export default class DistributedSyncPlugin extends Plugin {
       readBinary: (path) => this.app.vault.adapter.readBinary(path),
       write: (path, text) => this.app.vault.adapter.write(path, text),
       writeBinary: (path, data) => this.app.vault.adapter.writeBinary(path, data),
+      // Use the Vault API to notify Obsidian of new artifacts; the engine
+      // separately reserves candidate names before awaiting filesystem I/O.
+      createBinary: async (path, data) => {
+        await this.app.vault.createBinary(path, data);
+      },
       remove: (path) => this.app.vault.adapter.remove(path),
       rename: (from, to) => this.app.vault.adapter.rename(from, to),
       exists: (path) => this.app.vault.adapter.exists(path),
@@ -156,19 +153,65 @@ export default class DistributedSyncPlugin extends Plugin {
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
     this.setupEngine();
+    this.setupAutoSync();
   }
 
-  private updateStatus(status: "idle" | "syncing" | "conflict" | "error", details?: string): void {
+  private setupAutoSync(): void {
+    this.clearAutoSync();
+    if (!this.settings.token || !this.settings.autoSync) return;
+
+    this.syncTimer = window.setInterval(() => {
+      if (this.settings.autoSync && this.settings.token) this.triggerSync(false);
+    }, Math.max(this.settings.syncIntervalSeconds, 5) * 1000);
+    this.registerInterval(this.syncTimer);
+
+    this.startupTimer = window.setTimeout(() => {
+      this.startupTimer = null;
+      this.triggerSync(false);
+    }, 1500);
+    if (this.register) {
+      this.register(() => {
+        if (this.startupTimer !== null) {
+          window.clearTimeout(this.startupTimer);
+          this.startupTimer = null;
+        }
+      });
+    }
+  }
+
+  private clearAutoSync(): void {
+    if (this.syncTimer !== null) {
+      window.clearInterval(this.syncTimer);
+      this.syncTimer = null;
+    }
+    if (this.startupTimer !== null) {
+      window.clearTimeout(this.startupTimer);
+      this.startupTimer = null;
+    }
+  }
+
+  onunload(): void {
+    this.clearAutoSync();
+    if (this.debounceTimer !== null) {
+      window.clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
+    }
+  }
+
+  private updateStatus(status: "idle" | "syncing" | "conflict" | "error" | "pending", details?: string): void {
     if (!this.statusBarItem) return;
     switch (status) {
       case "syncing":
         this.statusBarItem.setText(details ? `🔄 Syncing (${details})...` : "🔄 Syncing...");
         break;
       case "conflict":
-        this.statusBarItem.setText("⚠️ Sync conflict");
+        this.statusBarItem.setText(details ? `⚠️ Sync conflict (${details})` : "⚠️ Sync conflict");
+        break;
+      case "pending":
+        this.statusBarItem.setText(`⚠️ ${details ?? "Sync pending"}`);
         break;
       case "error":
-        this.statusBarItem.setText("❌ Sync error");
+        this.statusBarItem.setText(details ? `❌ Sync error (${details})` : "❌ Sync error");
         break;
       default:
         this.statusBarItem.setText("✓ Synced");
@@ -188,17 +231,21 @@ export default class DistributedSyncPlugin extends Plugin {
 
     try {
       const res = await this.engine.sync();
-      if (res.conflicts > 0) {
+      if (res.failed > 0) {
+        this.updateStatus("error", `${res.failed} failed`);
+      } else if (res.conflicts > 0) {
         this.updateStatus("conflict");
+      } else if (res.pending > 0) {
+        this.updateStatus("pending", `${res.pending} pending`);
       } else {
         this.updateStatus("idle");
       }
       if (manual) {
-        new Notice(
-          `Sync complete: ${res.pulled} pulled, ${res.pushed} pushed${
-            res.conflicts > 0 ? `, ${res.conflicts} conflicts` : ""
-          }`
-        );
+        const parts = [`${res.pulled} pulled`, `${res.pushed} pushed`];
+        if (res.conflicts > 0) parts.push(`${res.conflicts} conflicts`);
+        if (res.failed > 0) parts.push(`${res.failed} failed`);
+        if (res.pending > 0) parts.push(`${res.pending} pending`);
+        new Notice(`Sync complete: ${parts.join(", ")}`);
       }
     } catch (e) {
       console.error("Sync error:", e);
@@ -221,16 +268,17 @@ export default class DistributedSyncPlugin extends Plugin {
   }
 
   private onFileCreated(file: TAbstractFile): void {
+    if (!(file instanceof TFile)) return;
     const path = normalizePath(file.path);
     if (isIgnored(path, this.settings.excludes)) return;
     const known = this.index.get(path);
     this.index.set(path, {
+      ...known,
       base_rev: known?.base_rev ?? 0,
       base_hash: known?.base_hash ?? "",
       local_hash: "",
       mtime: Date.now(),
       dirty: true,
-      folder: !(file instanceof TFile),
     });
     this.scheduleDebouncedSync();
   }
@@ -240,6 +288,7 @@ export default class DistributedSyncPlugin extends Plugin {
     if (isIgnored(path, this.settings.excludes)) return;
     const known = this.index.get(path);
     this.index.set(path, {
+      ...known,
       base_rev: known?.base_rev ?? 0,
       base_hash: known?.base_hash ?? "",
       local_hash: "",
@@ -267,14 +316,28 @@ export default class DistributedSyncPlugin extends Plugin {
     const newNorm = normalizePath(file.path);
     if (isIgnored(oldNorm, this.settings.excludes) && isIgnored(newNorm, this.settings.excludes)) return;
 
-    const known = this.index.get(oldNorm);
-    if (known && known.base_rev > 0) {
-      this.index.queueRename({ from: oldNorm, to: newNorm, base_rev: known.base_rev });
-      this.index.set(newNorm, { ...known, dirty: known.dirty ?? false });
-      this.index.remove(oldNorm);
-    } else {
-      this.onFileCreated(file);
+    const paths = file instanceof TFile ? [oldNorm] : this.index.allEntries()
+      .map(([path]) => path).filter((path) => path.startsWith(oldNorm + "/"));
+    for (const oldFile of paths) {
+      const newFile = newNorm + oldFile.slice(oldNorm.length);
+      const known = this.index.get(oldFile);
+      if (isIgnored(oldFile, this.settings.excludes)) continue;
+      if (isIgnored(newFile, this.settings.excludes)) {
+        // Moving into an excluded location is not a deletion of the remote
+        // copy. Detach tracking instead of leaving a dirty old path, which
+        // would otherwise be pushed as a server-side delete.
+        if (known) this.index.remove(oldFile);
+        continue;
+      }
+      if (known && known.base_rev > 0) {
+        this.index.queueRename({ from: oldFile, to: newFile, base_rev: known.base_rev });
+        this.index.set(newFile, { ...known, dirty: known.dirty ?? false });
+        this.index.remove(oldFile);
+      } else if (file instanceof TFile) {
+        this.onFileCreated(file);
+      }
     }
+    if (isIgnored(oldNorm, this.settings.excludes) && file instanceof TFile) this.onFileCreated(file);
     this.scheduleDebouncedSync();
   }
 }

@@ -31,7 +31,7 @@ function jsonResponse(data: unknown, status = 200, extraHeaders: Record<string, 
       "Content-Type": "application/json",
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, HEAD, POST, PUT, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "Authorization, Content-Type, Range, X-Base-Rev, X-Mtime, X-Folder, X-Device",
+      "Access-Control-Allow-Headers": "Authorization, Content-Type, Range, X-Base-Rev, X-Mtime, X-Folder, X-Device, X-Api-Key",
       ...extraHeaders,
     },
   });
@@ -49,7 +49,7 @@ export default {
         headers: {
           "Access-Control-Allow-Origin": "*",
           "Access-Control-Allow-Methods": "GET, HEAD, POST, PUT, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": "Authorization, Content-Type, Range, X-Base-Rev, X-Mtime, X-Folder, X-Device",
+          "Access-Control-Allow-Headers": "Authorization, Content-Type, Range, X-Base-Rev, X-Mtime, X-Folder, X-Device, X-Api-Key",
           "Access-Control-Max-Age": "86400",
         },
       });
@@ -69,12 +69,12 @@ export default {
       const apiKeyHeader = request.headers.get("X-Api-Key");
       const totalTokens = await countTokens(env.DB);
 
-      // Allow bootstrap if no tokens exist, or if valid token or API_KEY matches
-      const isBootstrap = totalTokens === 0;
-      const isApiKeyValid = env.API_KEY && apiKeyHeader === env.API_KEY;
-      const isTokenValid = await validateToken(env.DB, authHeader);
+      // A public, empty database is not authorization. Initial enrollment
+      // requires the configured secret; existing devices may enroll peers.
+      const isApiKeyValid = Boolean(env.API_KEY && apiKeyHeader === env.API_KEY);
+      const isTokenValid = totalTokens > 0 && await validateToken(env.DB, authHeader);
 
-      if (!isBootstrap && !isApiKeyValid && !isTokenValid) {
+      if (!isApiKeyValid && !isTokenValid) {
         return errorResponse(401, "unauthorized", "Valid authentication required to mint tokens");
       }
 
