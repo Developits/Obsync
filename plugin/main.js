@@ -30,6 +30,326 @@ __export(main_exports, {
 module.exports = __toCommonJS(main_exports);
 var import_obsidian2 = require("obsidian");
 
+// src/diagnostics.ts
+var DIAGNOSTICS_DIR = ".obsidian/plugins/obsidian-distributed-sync/diagnostics";
+var EVENTS = /* @__PURE__ */ new Set(["session_start", "session_stop", "previous_session_unclean", "marker_invalid", "sync_start", "sync_result", "sync_failure", "sync_exception", "startup_failure", "status_failure", "token_failure", "api_failure", "global_error", "unhandled_rejection", "queue_overflow"]);
+var OPERATIONS = /* @__PURE__ */ new Set(["scan", "pull", "push", "save"]);
+var CATEGORIES = /* @__PURE__ */ new Set(["error", "type", "range", "syntax", "reference", "api", "conflict", "unknown"]);
+var CODES = /* @__PURE__ */ new Set(["ENOSPC", "EACCES", "EPERM", "ENOENT", "EIO", "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "ENOTFOUND"]);
+var COUNT_FIELDS = ["pulled", "pushed", "conflicts", "failed", "pending", "dropped"];
+var encoder = new TextEncoder();
+var bytes = (text) => encoder.encode(text).length;
+var count = (value) => Number.isSafeInteger(value) && value >= 0 && value <= 1e9;
+var version = (value) => typeof value === "string" && /^\d{1,4}\.\d{1,4}(?:\.\d{1,4})?$/.test(value) ? value : "unknown";
+function stackLocations(stack) {
+  if (typeof stack !== "string") return [];
+  const locations = [];
+  for (const [index, line] of stack.slice(0, 8192).split("\n").entries()) {
+    if (index === 0 && /^\s*(?:Error|[A-Za-z]+Error):/.test(line)) continue;
+    if (!/^\s*at\s/.test(line) && !/^[^@]*@/.test(line)) continue;
+    const frame = /^\s*at\s+(?:.*\s\()?([^\s()]+):(\d{1,8}):(\d{1,8})\)?\s*$/.exec(line) ?? /^[^\s@]*@([^\s()]+):(\d{1,8}):(\d{1,8})\s*$/.exec(line);
+    if (!frame) {
+      locations.push({ own: false, line: 0, column: 0 });
+      continue;
+    }
+    locations.push({ own: ownSource(frame[1]), line: Number(frame[2]), column: Number(frame[3]) });
+  }
+  return locations;
+}
+function ownSource(source) {
+  return /^(?:plugin:obsidian-distributed-sync|(?:app:\/\/[^\s]+\/)?\.obsidian\/plugins\/obsidian-distributed-sync\/main\.js)$/.test(source);
+}
+function pluginFrames(stack) {
+  return stackLocations(stack).filter((f) => f.own).slice(0, 5).map((f) => ({ line: f.line, column: f.column }));
+}
+function safeError(error) {
+  try {
+    const e = error;
+    const names = { Error: "error", TypeError: "type", RangeError: "range", SyntaxError: "syntax", ReferenceError: "reference", ApiError: "api", ConflictError: "conflict" };
+    const row = { category: typeof e?.name === "string" ? names[e.name] ?? "unknown" : "unknown" };
+    if (typeof e?.code === "string" && CODES.has(e.code)) row.code = e.code;
+    if (Number.isInteger(e?.status) && Number(e?.status) >= 400 && Number(e?.status) <= 599) row.status = e?.status;
+    const frames = pluginFrames(e?.stack);
+    if (frames.length) row.frames = frames;
+    return row;
+  } catch {
+    return { category: "unknown" };
+  }
+}
+function fields(input) {
+  const out = {};
+  for (const key of COUNT_FIELDS) if (count(input[key])) out[key] = input[key];
+  if (typeof input.operation === "string" && OPERATIONS.has(input.operation)) out.operation = input.operation;
+  if (typeof input.category === "string" && CATEGORIES.has(input.category)) out.category = input.category;
+  if (typeof input.code === "string" && CODES.has(input.code)) out.code = input.code;
+  if (Number.isInteger(input.status) && Number(input.status) >= 400 && Number(input.status) <= 599) out.status = input.status;
+  if (Array.isArray(input.frames)) {
+    out.frames = input.frames.slice(0, 5).filter((f) => f && count(f.line) && count(f.column)).map((f) => ({ line: f.line, column: f.column }));
+  }
+  return out;
+}
+function validatedRow(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const r = value;
+  if (r.schema !== 1 || !Number.isSafeInteger(r.time) || Number(r.time) < 0 || typeof r.event !== "string" || !EVENTS.has(r.event)) return null;
+  if (typeof r.session !== "string" || !/^(?:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}|unknown)$/.test(r.session)) return null;
+  if (typeof r.platform !== "string" || !["desktop", "mobile", "unknown"].includes(r.platform)) return null;
+  if (r.pluginVersion !== "unknown" && version(r.pluginVersion) === "unknown" || r.obsidianVersion !== "unknown" && version(r.obsidianVersion) === "unknown") return null;
+  const buildSha256 = typeof r.buildSha256 === "string" && /^[a-f0-9]{64}$/.test(r.buildSha256) ? r.buildSha256 : "unknown";
+  return { schema: 1, time: r.time, session: r.session, pluginVersion: r.pluginVersion, obsidianVersion: r.obsidianVersion, platform: r.platform, buildSha256, event: r.event, ...fields(r) };
+}
+function sessionId() {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return "unknown";
+  }
+}
+var LocalDiagnostics = class {
+  session = sessionId();
+  options;
+  queue = [];
+  running = null;
+  current = "";
+  failed = false;
+  dropped = 0;
+  stopped = false;
+  closePromise = null;
+  startPromise = null;
+  initializing = false;
+  skippedRecords = 0;
+  buildSha256 = "unknown";
+  detachGlobals = null;
+  adapter;
+  constructor(adapter, options = {}) {
+    this.adapter = adapter;
+    this.options = options;
+  }
+  warn() {
+    if (!this.failed) {
+      this.failed = true;
+      try {
+        this.options.onFailure?.();
+      } catch {
+      }
+    }
+  }
+  row(event, data) {
+    return { schema: 1, time: Date.now(), session: this.session, pluginVersion: version(this.options.pluginVersion), obsidianVersion: version(this.options.obsidianVersion), platform: ["desktop", "mobile"].includes(this.options.platform ?? "") ? this.options.platform : "unknown", buildSha256: this.buildSha256, event, ...fields(data) };
+  }
+  log(event, data = {}) {
+    try {
+      if (this.stopped || !EVENTS.has(event)) return;
+      if (this.queue.length >= 128) {
+        this.dropped = Math.min(this.dropped + 1, 1e9);
+        return;
+      }
+      this.queue.push(JSON.stringify(this.row(event, data)) + "\n");
+      this.kick();
+    } catch {
+      this.warn();
+    }
+  }
+  kick() {
+    if (this.running || this.initializing) return;
+    this.running = Promise.resolve().then(() => this.drain()).catch(() => this.warn()).finally(() => {
+      this.running = null;
+      if (this.queue.length || this.dropped) this.kick();
+    });
+  }
+  async drain() {
+    while (this.queue.length || this.dropped) {
+      const batch = this.queue.splice(0);
+      if (this.dropped) {
+        batch.push(JSON.stringify(this.row("queue_overflow", { dropped: this.dropped })) + "\n");
+        this.dropped = 0;
+      }
+      for (const line of batch) {
+        try {
+          if (bytes(this.current) + bytes(line) > 256 * 1024) {
+            await this.adapter.write(`${DIAGNOSTICS_DIR}/previous.jsonl`, this.current);
+            this.current = "";
+          }
+          const next = this.current + line;
+          await this.adapter.write(`${DIAGNOSTICS_DIR}/current.jsonl`, next);
+          this.current = next;
+        } catch {
+          this.warn();
+        }
+      }
+    }
+  }
+  async flush() {
+    if (this.initializing) await this.startPromise;
+    while (this.running) await this.running;
+  }
+  start() {
+    if (this.stopped) return Promise.resolve();
+    if (!this.startPromise) {
+      this.initializing = true;
+      this.startPromise = this.initialize().catch(() => this.warn()).finally(() => {
+        this.initializing = false;
+        if (this.queue.length || this.dropped) this.kick();
+      });
+    }
+    return this.startPromise;
+  }
+  async initialize() {
+    try {
+      if (!await this.adapter.exists(DIAGNOSTICS_DIR)) await this.adapter.mkdir(DIAGNOSTICS_DIR);
+    } catch {
+      this.warn();
+    }
+    await this.identifyBuild();
+    const old = await this.readBounded("current.jsonl", 256 * 1024);
+    if (old !== null) {
+      const lines = this.parseRows(old).map((r) => JSON.stringify(r) + "\n");
+      let size = lines.reduce((total, line) => total + bytes(line), 0);
+      while (size > 256 * 1024) {
+        size -= bytes(lines.shift());
+        this.skippedRecords++;
+      }
+      this.current = lines.join("");
+    }
+    const marker = await this.readBounded("session.json", 256);
+    if (marker !== null) {
+      try {
+        const state = JSON.parse(marker);
+        if (state?.schema !== 1 || !["open", "closed"].includes(state.state)) throw new Error();
+        if (state.state === "open") this.log("previous_session_unclean");
+      } catch {
+        this.log("marker_invalid");
+      }
+    }
+    try {
+      await this.adapter.write(`${DIAGNOSTICS_DIR}/session.json`, JSON.stringify({ schema: 1, state: "open" }));
+    } catch {
+      this.warn();
+    }
+    this.initializing = false;
+    this.log("session_start");
+    this.kick();
+    await this.flush();
+  }
+  async readBounded(name, cap) {
+    try {
+      const path = `${DIAGNOSTICS_DIR}/${name}`;
+      const stat = await this.adapter.stat(path);
+      if (stat === null) return null;
+      if (!Number.isSafeInteger(stat.size) || stat.size < 0 || stat.size > cap) {
+        this.warn();
+        this.skippedRecords++;
+        return null;
+      }
+      const text = await this.adapter.read(path);
+      if (typeof text !== "string" || bytes(text) > cap) {
+        this.warn();
+        this.skippedRecords++;
+        return null;
+      }
+      return text;
+    } catch {
+      this.warn();
+      return null;
+    }
+  }
+  parseRows(text) {
+    const rows = [];
+    for (const line of text.split("\n")) {
+      if (!line) continue;
+      try {
+        if (bytes(line) > 8192) throw new Error();
+        const row = validatedRow(JSON.parse(line));
+        if (!row) throw new Error();
+        rows.push(row);
+      } catch {
+        this.skippedRecords++;
+      }
+    }
+    return rows;
+  }
+  async identifyBuild() {
+    try {
+      if (!this.adapter.readBinary) return;
+      const path = ".obsidian/plugins/obsidian-distributed-sync/main.js";
+      const stat = await this.adapter.stat(path);
+      if (!stat || !Number.isSafeInteger(stat.size) || stat.size < 0 || stat.size > 4 * 1024 * 1024) return;
+      const data = await this.adapter.readBinary(path);
+      if (data.byteLength > 4 * 1024 * 1024 || data.byteLength !== stat.size) return;
+      this.buildSha256 = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", data)), (b) => b.toString(16).padStart(2, "0")).join("");
+    } catch {
+    }
+  }
+  async export() {
+    await this.flush();
+    const rows = [];
+    let used = 0;
+    for (const name of ["previous.jsonl", "current.jsonl"]) {
+      const text = await this.readBounded(name, 256 * 1024);
+      if (text === null) continue;
+      for (const row of this.parseRows(text)) {
+        const size = bytes(JSON.stringify(row)) + 1;
+        if (used + size > 512 * 1024) {
+          this.skippedRecords++;
+          continue;
+        }
+        rows.push(row);
+        used += size;
+      }
+    }
+    const path = `${DIAGNOSTICS_DIR}/export.json`;
+    try {
+      await this.adapter.write(path, JSON.stringify({ schema: 1, exportTime: Date.now(), buildSha256: this.buildSha256, diagnosticsUnavailable: this.failed, skippedRecords: this.skippedRecords, events: rows }));
+      return { path, unavailable: this.failed };
+    } catch {
+      this.warn();
+      return { path: null, unavailable: true };
+    }
+  }
+  attachGlobalHandlers(target) {
+    if (this.detachGlobals || !target.addEventListener || !target.removeEventListener) return;
+    const capture = (event) => {
+      try {
+        const e = event;
+        const error = event.type === "unhandledrejection" ? e.reason : e.error;
+        const safe = safeError(error);
+        const filename = typeof e.filename === "string" ? e.filename : "";
+        const ownFile = ownSource(filename);
+        const ownThrow = stackLocations(error?.stack)[0]?.own === true;
+        if (filename ? !ownFile : !ownThrow) return;
+        if (!safe.frames && ownFile && count(e.lineno) && count(e.colno)) safe.frames = [{ line: e.lineno, column: e.colno }];
+        this.log(event.type === "unhandledrejection" ? "unhandled_rejection" : "global_error", safe);
+      } catch {
+      }
+    };
+    target.addEventListener("error", capture);
+    target.addEventListener("unhandledrejection", capture);
+    this.detachGlobals = () => {
+      target.removeEventListener?.("error", capture);
+      target.removeEventListener?.("unhandledrejection", capture);
+    };
+  }
+  close() {
+    if (this.closePromise) return this.closePromise;
+    this.detachGlobals?.();
+    this.detachGlobals = null;
+    this.log("session_stop");
+    this.stopped = true;
+    this.closePromise = (async () => {
+      await this.startPromise;
+      await this.flush();
+      if (!this.failed) {
+        try {
+          await this.adapter.write(`${DIAGNOSTICS_DIR}/session.json`, JSON.stringify({ schema: 1, state: "closed" }));
+        } catch {
+          this.warn();
+        }
+      }
+    })();
+    return this.closePromise;
+  }
+};
+
 // src/paths.ts
 function normalizePath(path) {
   return path.normalize("NFC").replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
@@ -275,36 +595,88 @@ var SyncClient = class {
 var LocalIndex = class {
   data = {
     last_seq: 0,
-    files: {},
+    files: /* @__PURE__ */ Object.create(null),
     pending_renames: []
   };
   dirty = false;
+  revision = 0;
+  generation = 0;
+  saveQueue = Promise.resolve();
   adapter;
   storagePath;
   constructor(adapter, storagePath = "sync-state.json") {
     this.adapter = adapter;
     this.storagePath = storagePath;
   }
-  async load() {
-    try {
-      const raw = await this.adapter.read(this.storagePath);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        this.data = {
-          last_seq: Number(parsed.last_seq || 0),
-          files: parsed.files || {},
-          pending_renames: parsed.pending_renames || []
-        };
-      }
-    } catch {
-      this.data = { last_seq: 0, files: {}, pending_renames: [] };
+  parse(raw) {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !Number.isSafeInteger(parsed.last_seq) || parsed.last_seq < 0 || !parsed.files || typeof parsed.files !== "object" || Array.isArray(parsed.files) || parsed.recovery_pending !== void 0 && typeof parsed.recovery_pending !== "boolean" || parsed.pending_renames !== void 0 && !Array.isArray(parsed.pending_renames) || parsed.generation !== void 0 && (!Number.isSafeInteger(parsed.generation) || parsed.generation < 0)) {
+      throw new Error("Invalid sync index schema");
     }
+    for (const state of Object.values(parsed.files)) {
+      if (!state || typeof state !== "object" || !Number.isSafeInteger(state.base_rev) || state.base_rev < 0 || typeof state.base_hash !== "string" || typeof state.local_hash !== "string" || state.base_path !== void 0 && typeof state.base_path !== "string" || [state.folder, state.dirty, state.preserve_on_delete, state.recovery_preserved].some((value) => value !== void 0 && typeof value !== "boolean") || !Number.isFinite(state.mtime)) throw new Error("Invalid sync index entry");
+    }
+    for (const rename of parsed.pending_renames ?? []) {
+      if (!rename || typeof rename.from !== "string" || typeof rename.to !== "string" || !Number.isSafeInteger(rename.base_rev) || rename.base_rev < 1) {
+        throw new Error("Invalid sync index rename queue");
+      }
+    }
+    return { generation: parsed.generation ?? 0, last_seq: parsed.last_seq, files: Object.assign(/* @__PURE__ */ Object.create(null), parsed.files), pending_renames: parsed.pending_renames ?? [], recovery_pending: parsed.recovery_pending === true };
+  }
+  async load() {
+    let failure;
+    let newest;
+    for (const path of [this.storagePath, this.storagePath + ".bak"]) {
+      try {
+        const raw = await this.adapter.read(path);
+        if (raw === null) continue;
+        const data = this.parse(raw);
+        if (!newest || data.generation > newest.data.generation) {
+          newest = { data, backup: path !== this.storagePath };
+        }
+      } catch (err) {
+        failure = err;
+      }
+    }
+    if (newest) {
+      this.data = newest.data;
+      this.generation = this.data.generation;
+      if (newest.backup) this.data.recovery_pending = true;
+      this.revision++;
+      this.dirty = newest.backup;
+      return;
+    }
+    if (failure) throw new Error(`Cannot recover sync index: ${String(failure)}`);
+    this.data = { last_seq: 0, files: /* @__PURE__ */ Object.create(null), pending_renames: [] };
+    this.generation = 0;
     this.dirty = false;
   }
   async save() {
-    if (!this.dirty) return;
-    await this.adapter.write(this.storagePath, JSON.stringify(this.data, null, 2));
-    this.dirty = false;
+    const save = this.saveQueue.then(async () => {
+      if (!this.dirty) return;
+      const revision = this.revision;
+      if (this.generation === Number.MAX_SAFE_INTEGER) throw new Error("Sync index generation exhausted");
+      const generation = ++this.generation;
+      const payload = JSON.stringify({ ...this.data, generation }, null, 2);
+      await this.adapter.write(this.storagePath + ".bak", payload);
+      await this.adapter.write(this.storagePath, payload);
+      if (this.revision === revision) this.dirty = false;
+    });
+    this.saveQueue = save.catch(() => {
+    });
+    return save;
+  }
+  changed() {
+    this.revision++;
+    this.dirty = true;
+  }
+  needsRecovery() {
+    return this.data.recovery_pending === true;
+  }
+  finishRecovery() {
+    for (const state of Object.values(this.data.files)) delete state.recovery_preserved;
+    this.data.recovery_pending = false;
+    this.changed();
   }
   getSeq() {
     return this.data.last_seq;
@@ -312,20 +684,23 @@ var LocalIndex = class {
   setSeq(seq) {
     if (seq > this.data.last_seq) {
       this.data.last_seq = seq;
-      this.dirty = true;
+      this.changed();
     }
   }
   get(path) {
     return this.data.files[path];
   }
   set(path, state) {
+    if (this.needsRecovery() && this.data.files[path]?.recovery_preserved) {
+      state = { ...state, recovery_preserved: true };
+    }
     this.data.files[path] = state;
-    this.dirty = true;
+    this.changed();
   }
   remove(path) {
     if (path in this.data.files) {
       delete this.data.files[path];
-      this.dirty = true;
+      this.changed();
     }
   }
   allEntries() {
@@ -335,7 +710,7 @@ var LocalIndex = class {
     this.data.pending_renames = this.data.pending_renames || [];
     this.data.pending_renames = this.data.pending_renames.filter((r) => r.from !== rename.from);
     this.data.pending_renames.push(rename);
-    this.dirty = true;
+    this.changed();
   }
   getQueuedRenames() {
     return this.data.pending_renames || [];
@@ -343,7 +718,7 @@ var LocalIndex = class {
   clearQueuedRename(from) {
     if (this.data.pending_renames) {
       this.data.pending_renames = this.data.pending_renames.filter((r) => r.from !== from);
-      this.dirty = true;
+      this.changed();
     }
   }
 };
@@ -356,7 +731,8 @@ var DEFAULT_SETTINGS = {
   deviceName: "Desktop",
   autoSync: true,
   syncIntervalSeconds: 30,
-  excludes: [".obsidian", ".trash", ".git"]
+  excludes: [".obsidian", ".trash", ".git"],
+  localDiagnostics: true
 };
 var DistributedSyncSettingTab = class extends import_obsidian.PluginSettingTab {
   plugin;
@@ -402,6 +778,10 @@ var DistributedSyncSettingTab = class extends import_obsidian.PluginSettingTab {
       })
     );
     containerEl.createEl("h3", { text: "Add Another Device" });
+    new import_obsidian.Setting(containerEl).setName("Local diagnostics").setDesc("Bounded local-only troubleshooting logs; no note content, paths, credentials, or uploads. Disabling retains existing logs.").addToggle((toggle) => toggle.setValue(this.plugin.settings.localDiagnostics).onChange(async (value) => {
+      this.plugin.settings.localDiagnostics = value;
+      await this.plugin.saveSettings();
+    })).addButton((button) => button.setButtonText("Export diagnostics").onClick(() => this.plugin.exportDiagnostics()));
     let newDeviceName = "Tablet";
     new import_obsidian.Setting(containerEl).setName("New Device Name").setDesc("Generate an authenticated token for your phone, tablet, or another computer").addText(
       (text) => text.setPlaceholder("Tablet").setValue(newDeviceName).onChange((val) => {
@@ -419,6 +799,7 @@ var DistributedSyncSettingTab = class extends import_obsidian.PluginSettingTab {
           await navigator.clipboard.writeText(res.token);
           new import_obsidian.Notice(`Token for "${newDeviceName}" generated and copied to clipboard! Paste it on your other device.`, 12e3);
         } catch (e) {
+          await this.plugin.recordDiagnosticFailure("token_failure", e);
           new import_obsidian.Notice(`Failed to generate token: ${e}`);
         } finally {
           btn.setDisabled(false);
@@ -622,6 +1003,26 @@ var SyncEngine = class {
     const errors = [];
     this.scanFailures.clear();
     const messageOf = (err) => err instanceof Error ? err.message : String(err);
+    if (this.index.needsRecovery()) {
+      for (const [path, state] of this.index.allEntries()) {
+        if (isIgnored(path, this.excludes) || state.folder || state.base_rev < 1 || state.recovery_preserved) continue;
+        try {
+          if (!await this.adapter.exists(path)) continue;
+          const localHash = await computeSha256(await this.adapter.readBinary(path));
+          if (localHash === state.base_hash) continue;
+          const rename = this.index.getQueuedRenames().find((r) => normalizePath(r.to) === path);
+          const remote = await this.client.getFile(state.base_path ?? rename?.from ?? path, state.base_rev);
+          const copy = await this.preserveConflict(path, "index-recovery", remote.data);
+          this.index.set(path, { ...this.index.get(path), recovery_preserved: true });
+          this.onConflict?.(path, copy);
+          conflictCount++;
+        } catch (err) {
+          this.scanFailures.add(path);
+          errors.push({ path, operation: "scan", message: `Index recovery: ${messageOf(err)}` });
+        }
+      }
+      if (this.scanFailures.size === 0) this.index.finishRecovery();
+    }
     for (const [path, state] of this.index.allEntries()) {
       if (state.folder) this.index.remove(path);
     }
@@ -700,6 +1101,7 @@ var SyncEngine = class {
     await pullChanges();
     const queuedRenames = this.index.getQueuedRenames();
     for (const rename of queuedRenames) {
+      if (this.scanFailures.has(normalizePath(rename.from)) || this.scanFailures.has(normalizePath(rename.to))) continue;
       try {
         const res = await this.client.rename(rename.from, rename.to, rename.base_rev);
         this.index.clearQueuedRename(rename.from);
@@ -745,6 +1147,7 @@ var SyncEngine = class {
           this.index.set(rename.to, {
             ...known,
             base_rev: destination?.rev ?? 0,
+            base_path: void 0,
             base_hash: destination?.hash ?? "",
             local_hash: "",
             mtime: Date.now(),
@@ -772,6 +1175,7 @@ var SyncEngine = class {
       }
       try {
         if (this.scanFailures.has(path)) continue;
+        if (this.index.getQueuedRenames().some((rename) => normalizePath(rename.to) === path)) continue;
         const fileExists = await this.adapter.exists(path);
         if (!fileExists) {
           try {
@@ -865,10 +1269,20 @@ var SyncEngine = class {
   async applyRemoteChange(entry) {
     const path = normalizePath(entry.path);
     if (isIgnored(path, this.excludes) || entry.folder) {
+      if (entry.renamed_from && !entry.deleted && !entry.folder) {
+        const source = normalizePath(entry.renamed_from);
+        const known2 = this.index.get(source);
+        if (known2 && known2.base_rev > 0 && !isIgnored(source, this.excludes)) {
+          this.index.set(source, { ...known2, preserve_on_delete: true });
+        }
+      }
       return { conflict: false };
     }
     if (this.scanFailures.has(path)) {
       return { conflict: false, failed: true };
+    }
+    if (this.index.getQueuedRenames().some((rename) => normalizePath(rename.to) === path)) {
+      return { conflict: false };
     }
     if (entry.renamed_from && !this.index.get(path)) {
       const source = normalizePath(entry.renamed_from);
@@ -903,6 +1317,7 @@ var SyncEngine = class {
         });
         return { conflict: false };
       }
+      let preserved = false;
       if (fileExists) {
         const sameIdentity = known !== void 0 && known.base_rev > 0 && known.base_rev === entry.rev - 1 && !known.dirty;
         if (!sameIdentity) {
@@ -921,10 +1336,19 @@ var SyncEngine = class {
           this.index.set(path, { ...known, base_rev: entry.rev, base_hash: "", base_path: void 0, dirty: true });
           return { conflict: false };
         }
+        if (known.preserve_on_delete) {
+          const copy = await this.preserveConflict(path, "excluded-rename", await this.adapter.readBinary(path));
+          preserved = true;
+          this.onConflict?.(path, copy);
+          if (await this.localHashOrNull(path) !== currentHash) {
+            this.index.set(path, { ...known, base_rev: entry.rev, base_hash: "", base_path: void 0, dirty: true });
+            return { conflict: true };
+          }
+        }
         await this.adapter.remove(path);
       }
       this.index.remove(path);
-      return { conflict: false };
+      return { conflict: preserved };
     }
     if (!known?.dirty || !fileExists) {
       const snapshot = fileExists ? await computeSha256(await this.adapter.readBinary(path)) : null;
@@ -1171,8 +1595,13 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
   debounceTimer = null;
   syncTimer = null;
   startupTimer = null;
+  diagnostics = null;
+  diagnosticsConfiguration = Promise.resolve();
+  unloading = false;
   async onload() {
     await this.loadSettings();
+    await this.configureDiagnostics();
+    this.addCommand({ id: "export-diagnostics", name: "Export local diagnostics", callback: () => this.exportDiagnostics() });
     const storageAdapter = {
       read: async (path) => {
         const fullPath = `.obsidian/plugins/obsidian-distributed-sync/${path}`;
@@ -1190,7 +1619,12 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
       }
     };
     this.index = new LocalIndex(storageAdapter, "state.json");
-    await this.index.load();
+    try {
+      await this.index.load();
+    } catch (error) {
+      await this.recordDiagnosticFailure("startup_failure", error);
+      throw error;
+    }
     this.setupEngine();
     this.statusBarItem = this.addStatusBarItem();
     this.updateStatus("idle");
@@ -1217,6 +1651,7 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
           const stats = await this.client.stats();
           new import_obsidian2.Notice(`Sync online: ${stats.files} files on server (seq: ${stats.seq})`);
         } catch (e) {
+          await this.recordDiagnosticFailure("status_failure", e);
           new import_obsidian2.Notice(`Sync server error: ${e}`);
         }
       }
@@ -1233,7 +1668,16 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
       this.settings.serverUrl,
       this.settings.token,
       this.settings.deviceName,
-      import_obsidian2.requestUrl
+      async (params) => {
+        try {
+          const response = await (0, import_obsidian2.requestUrl)(params);
+          if (response.status >= 400) this.diagnostics?.log("api_failure", { category: "api", status: response.status });
+          return response;
+        } catch (error) {
+          this.diagnostics?.log("api_failure", safeError(error));
+          throw error;
+        }
+      }
     );
     const vaultAdapter = {
       read: (path) => this.app.vault.adapter.read(path),
@@ -1281,6 +1725,7 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
   }
   async saveSettings() {
     await this.saveData(this.settings);
+    await this.configureDiagnostics();
     this.setupEngine();
     this.setupAutoSync();
   }
@@ -1315,11 +1760,49 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
     }
   }
   onunload() {
+    this.unloading = true;
     this.clearAutoSync();
     if (this.debounceTimer !== null) {
       window.clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
+    return this.diagnostics?.close() ?? Promise.resolve();
+  }
+  configureDiagnostics() {
+    const update = () => this.updateDiagnostics();
+    this.diagnosticsConfiguration = this.diagnosticsConfiguration.then(update, update);
+    return this.diagnosticsConfiguration;
+  }
+  async updateDiagnostics() {
+    if (!this.settings.localDiagnostics || this.unloading) {
+      await this.diagnostics?.close();
+      this.diagnostics = null;
+      return;
+    }
+    if (this.diagnostics) return;
+    this.diagnostics = new LocalDiagnostics(this.app.vault.adapter, {
+      pluginVersion: this.manifest?.version,
+      obsidianVersion: import_obsidian2.apiVersion,
+      platform: import_obsidian2.Platform?.isMobile ? "mobile" : import_obsidian2.Platform?.isDesktop ? "desktop" : "unknown",
+      onFailure: () => {
+        new import_obsidian2.Notice("Local sync diagnostics unavailable. Sync is unaffected; diagnostic export may be incomplete.", 8e3);
+      }
+    });
+    this.diagnostics.attachGlobalHandlers(window);
+    await this.diagnostics.start();
+  }
+  async recordDiagnosticFailure(event, error) {
+    this.diagnostics?.log(event, safeError(error));
+    await this.diagnostics?.flush();
+  }
+  async exportDiagnostics() {
+    if (!this.diagnostics) {
+      new import_obsidian2.Notice("Local sync diagnostics are disabled. Enable them in settings before exporting.");
+      return;
+    }
+    const result = await this.diagnostics.export();
+    if (!result.path) new import_obsidian2.Notice("Diagnostic export failed: local storage unavailable.", 1e4);
+    else new import_obsidian2.Notice(`Diagnostic export${result.unavailable ? " incomplete (local storage unavailable)" : " saved"}: ${result.path}. Review before sharing; nothing was uploaded.`, 15e3);
   }
   updateStatus(status, details) {
     if (!this.statusBarItem) return;
@@ -1349,8 +1832,11 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
     }
     this.isSyncing = true;
     this.updateStatus("syncing");
+    this.diagnostics?.log("sync_start");
     try {
       const res = await this.engine.sync();
+      this.diagnostics?.log("sync_result", { pulled: res.pulled, pushed: res.pushed, conflicts: res.conflicts, failed: res.failed, pending: res.pending });
+      for (const failure of res.errors) this.diagnostics?.log("sync_failure", { operation: failure.operation, category: "unknown" });
       if (res.failed > 0) {
         this.updateStatus("error", `${res.failed} failed`);
       } else if (res.conflicts > 0) {
@@ -1368,11 +1854,12 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
         new import_obsidian2.Notice(`Sync complete: ${parts.join(", ")}`);
       }
     } catch (e) {
-      console.error("Sync error:", e);
+      this.diagnostics?.log("sync_exception", safeError(e));
       this.updateStatus("error");
       if (manual) new import_obsidian2.Notice(`Sync failed: ${e}`);
     } finally {
       this.isSyncing = false;
+      await this.diagnostics?.flush();
     }
   }
   scheduleDebouncedSync() {

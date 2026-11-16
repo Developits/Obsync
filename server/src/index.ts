@@ -41,6 +41,39 @@ function errorResponse(status: number, error: string, message: string): Response
   return jsonResponse({ error, message }, status);
 }
 
+class InvalidInput extends Error {}
+
+function integer(value: unknown, name: string, min = 0, max = Number.MAX_SAFE_INTEGER): number {
+  if ((typeof value !== "number" && typeof value !== "string") ||
+      (typeof value === "string" && !/^\d+$/.test(value))) {
+    throw new InvalidInput(`${name} must be an integer between ${min} and ${max}`);
+  }
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < min || number > max) {
+    throw new InvalidInput(`${name} must be an integer between ${min} and ${max}`);
+  }
+  return number;
+}
+
+function validatePath(path: string): void {
+  // Clients publish NFC vault-relative slash paths. Reject aliases/traversal,
+  // but do not impose client exclusion rules or ban reserved URI characters.
+  if (path !== path.normalize("NFC") || path.includes("\0") || path.includes("\\") ||
+      /^[A-Za-z]:/.test(path) || path.split("/").some(part => !part || part === "." || part === "..")) {
+    throw new InvalidInput("Expected an NFC vault-relative path without traversal or empty segments");
+  }
+}
+
+async function readObject(request: Request): Promise<Record<string, unknown> | null> {
+  try {
+    const body: unknown = await request.json();
+    return body !== null && typeof body === "object" && !Array.isArray(body)
+      ? body as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method === "OPTIONS") {
@@ -78,11 +111,11 @@ export default {
         return errorResponse(401, "unauthorized", "Valid authentication required to mint tokens");
       }
 
-      let body: { name?: string } = {};
-      try {
-        body = (await request.json()) as { name?: string };
-      } catch {}
-      const deviceName = body.name || "default-device";
+      const body = await readObject(request);
+      if (!body || (body.name !== undefined && typeof body.name !== "string")) {
+        return errorResponse(400, "invalid_body", "Expected a JSON object with an optional string name");
+      }
+      const deviceName = (body.name as string) || "default-device";
       const { token } = await createToken(env.DB, deviceName);
       return jsonResponse({ token, vault: "vault" });
     }
@@ -105,8 +138,8 @@ export default {
 
       // 2. Incremental delta changelog
       if (path === "/v1/changes" && request.method === "GET") {
-        const since = parseInt(url.searchParams.get("since") || "0", 10);
-        const limit = parseInt(url.searchParams.get("limit") || "500", 10);
+        const since = integer(url.searchParams.get("since") ?? "0", "since");
+        const limit = integer(url.searchParams.get("limit") ?? "500", "limit", 1, 1000);
         const changes = await getChanges(env.DB, since, limit);
 
         // Format boolean fields for client engine
@@ -136,13 +169,14 @@ export default {
         if (!filePath) {
           return errorResponse(400, "missing_path", "Missing path query parameter");
         }
+        validatePath(filePath);
 
         const revParam = url.searchParams.get("rev");
         let targetHash: string | null = null;
         let targetRev = 0;
 
         if (revParam != null) {
-          targetRev = parseInt(revParam, 10);
+          targetRev = integer(revParam, "rev", 1);
           targetHash = await getRevisionHash(env.DB, filePath, targetRev);
         } else {
           const cur = await getFile(env.DB, filePath);
@@ -156,23 +190,33 @@ export default {
           return errorResponse(404, "not_found", "File revision not found or deleted");
         }
 
-        // Parse Range request if provided
-        const rangeHeader = request.headers.get("Range");
+        // HEAD ignores Range. GET supports one byte range; invalid/multiple
+        // ranges receive 416 rather than being partially interpreted by R2.
+        const metadata = await env.BUCKET.head(`blobs/${targetHash.slice(0, 2)}/${targetHash}`);
+        if (!metadata) {
+          return errorResponse(404, "blob_missing", "Blob content missing from storage");
+        }
+        const totalSize = metadata.size;
+        const rangeHeader = request.method === "GET" ? request.headers.get("Range") : null;
         let rangeOpt: R2Range | undefined;
         let startByte = 0;
-        let endByte = 0;
-        let isRange = false;
-
-        if (rangeHeader && rangeHeader.startsWith("bytes=")) {
-          const parts = rangeHeader.slice("bytes=".length).split("-");
-          startByte = parseInt(parts[0], 10);
-          if (parts[1]) {
-            endByte = parseInt(parts[1], 10);
-            rangeOpt = { offset: startByte, length: endByte - startByte + 1 };
-          } else {
-            rangeOpt = { offset: startByte };
+        let endByte = totalSize - 1;
+        if (rangeHeader !== null) {
+          const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
+          const first = match?.[1] ? Number(match[1]) : null;
+          const last = match?.[2] ? Number(match[2]) : null;
+          const invalid = !match || (first === null && last === null) || totalSize === 0 ||
+            (first !== null && (!Number.isSafeInteger(first) || first >= totalSize)) ||
+            (last !== null && !Number.isSafeInteger(last)) ||
+            (first === null && last === 0) ||
+            (first !== null && last !== null && last < first);
+          if (invalid) {
+            return jsonResponse({ error: "invalid_range", message: "Expected one satisfiable byte range" }, 416,
+              { "Content-Range": `bytes */${totalSize}` });
           }
-          isRange = true;
+          startByte = first === null ? Math.max(0, totalSize - last!) : first;
+          endByte = first === null || last === null ? totalSize - 1 : Math.min(last, totalSize - 1);
+          rangeOpt = { offset: startByte, length: endByte - startByte + 1 };
         }
 
         const blob = await getBlob(env.BUCKET, targetHash, rangeOpt);
@@ -200,8 +244,10 @@ export default {
           "Access-Control-Allow-Origin": "*",
         };
 
-        if (isRange) {
-          headers["Content-Range"] = `bytes ${startByte}-${startByte + blob.size - 1}/${blob.size}`;
+        headers["Accept-Ranges"] = "bytes";
+        headers["Content-Length"] = String(rangeOpt ? endByte - startByte + 1 : totalSize);
+        if (rangeOpt) {
+          headers["Content-Range"] = `bytes ${startByte}-${endByte}/${totalSize}`;
           return new Response(blob.body, { status: 206, headers });
         }
 
@@ -214,9 +260,10 @@ export default {
         if (!filePath) {
           return errorResponse(400, "missing_path", "Missing path query parameter");
         }
+        validatePath(filePath);
 
-        const baseRev = parseInt(request.headers.get("X-Base-Rev") || "0", 10);
-        const mtime = parseInt(request.headers.get("X-Mtime") || String(Date.now()), 10);
+        const baseRev = integer(request.headers.get("X-Base-Rev") ?? "0", "X-Base-Rev", 0, Number.MAX_SAFE_INTEGER - 1);
+        const mtime = integer(request.headers.get("X-Mtime") ?? Date.now(), "X-Mtime");
         const isFolder = request.headers.get("X-Folder") === "1";
 
         let hash = "";
@@ -255,7 +302,8 @@ export default {
         if (!filePath) {
           return errorResponse(400, "missing_path", "Missing path query parameter");
         }
-        const baseRev = parseInt(request.headers.get("X-Base-Rev") || "0", 10);
+        validatePath(filePath);
+        const baseRev = integer(request.headers.get("X-Base-Rev") ?? "0", "X-Base-Rev", 0, Number.MAX_SAFE_INTEGER - 1);
 
         const tombstone = await deleteFile(env.DB, filePath, baseRev, deviceName);
         return jsonResponse({
@@ -269,12 +317,17 @@ export default {
 
       // 6. Rename (POST /v1/rename)
       if (path === "/v1/rename" && request.method === "POST") {
-        const body = (await request.json()) as { from: string; to: string; base_rev: number };
-        if (!body.from || !body.to || body.base_rev == null) {
+        const body = await readObject(request);
+        if (!body || typeof body.from !== "string" || !body.from ||
+            typeof body.to !== "string" || !body.to || body.from === body.to || body.base_rev == null) {
           return errorResponse(400, "invalid_rename", "Body must include from, to, and base_rev");
         }
 
-        const newDst = await renameFile(env.DB, body.from, body.to, body.base_rev, deviceName);
+        validatePath(body.from);
+        validatePath(body.to);
+        if (typeof body.base_rev !== "number") throw new InvalidInput("base_rev must be a JSON integer");
+        const baseRev = integer(body.base_rev, "base_rev", 0, Number.MAX_SAFE_INTEGER - 1);
+        const newDst = await renameFile(env.DB, body.from, body.to, baseRev, deviceName);
         return jsonResponse({
           path: newDst.path,
           rev: newDst.rev,
@@ -286,7 +339,7 @@ export default {
 
       // 7. Recoverable deleted files
       if (path === "/v1/deleted" && request.method === "GET") {
-        const limit = parseInt(url.searchParams.get("limit") || "200", 10);
+        const limit = integer(url.searchParams.get("limit") ?? "200", "limit", 1, 500);
         const entries = await getDeletedFiles(env.DB, limit);
         return jsonResponse({ entries });
       }
@@ -304,14 +357,18 @@ export default {
       }
 
       if (path === "/v1/retention" && request.method === "PUT") {
-        const body = (await request.json()) as { days?: number };
-        const days = body.days ?? 30;
+        const body = await readObject(request);
+        if (!body) return errorResponse(400, "invalid_body", "Expected a JSON object");
+        // Policy: explicit whole days, inclusive 0..36500 (~100 years).
+        if (typeof body.days !== "number") throw new InvalidInput("days must be a JSON integer");
+        const days = integer(body.days, "days", 0, 36500);
         await setRetentionDays(env.DB, days);
         return jsonResponse({ days });
       }
 
       return errorResponse(404, "not_found", `Route ${request.method} ${path} not found`);
     } catch (err: unknown) {
+      if (err instanceof InvalidInput) return errorResponse(400, "invalid_input", err.message);
       if (err instanceof ConflictError) {
         return jsonResponse(
           {

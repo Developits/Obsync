@@ -99,6 +99,31 @@ export class SyncEngine {
     this.scanFailures.clear();
     const messageOf = (err: unknown): string => err instanceof Error ? err.message : String(err);
 
+    // Backup recovery restores identities, but local bytes may have changed
+    // since that snapshot. Preserve their recorded remote bases visibly
+    // before normal reconciliation, rather than trusting a recovered cursor
+    // to mean the divergent versions have already been handled.
+    if (this.index.needsRecovery()) {
+      for (const [path, state] of this.index.allEntries()) {
+        if (isIgnored(path, this.excludes) || state.folder || state.base_rev < 1 || state.recovery_preserved) continue;
+        try {
+          if (!await this.adapter.exists(path)) continue;
+          const localHash = await computeSha256(await this.adapter.readBinary(path));
+          if (localHash === state.base_hash) continue;
+          const rename = this.index.getQueuedRenames().find((r) => normalizePath(r.to) === path);
+          const remote = await this.client.getFile(state.base_path ?? rename?.from ?? path, state.base_rev);
+          const copy = await this.preserveConflict(path, "index-recovery", remote.data);
+          this.index.set(path, { ...this.index.get(path)!, recovery_preserved: true });
+          this.onConflict?.(path, copy);
+          conflictCount++;
+        } catch (err) {
+          this.scanFailures.add(path);
+          errors.push({ path, operation: "scan", message: `Index recovery: ${messageOf(err)}` });
+        }
+      }
+      if (this.scanFailures.size === 0) this.index.finishRecovery();
+    }
+
     // Directories are derived from file paths, never uploaded as binary data.
     for (const [path, state] of this.index.allEntries()) {
       if (state.folder) this.index.remove(path);
@@ -194,6 +219,9 @@ export class SyncEngine {
     // Phase 2: Push queued renames
     const queuedRenames = this.index.getQueuedRenames();
     for (const rename of queuedRenames) {
+      // Failed historical recovery protects both identities, including the
+      // semantic-conflict fallback which otherwise discards the base tuple.
+      if (this.scanFailures.has(normalizePath(rename.from)) || this.scanFailures.has(normalizePath(rename.to))) continue;
       try {
         const res = await this.client.rename(rename.from, rename.to, rename.base_rev);
         this.index.clearQueuedRename(rename.from);
@@ -238,6 +266,7 @@ export class SyncEngine {
           const known = this.index.get(rename.to);
           this.index.set(rename.to, {
             ...known, base_rev: destination?.rev ?? 0,
+            base_path: undefined,
             base_hash: destination?.hash ?? "", local_hash: "", mtime: Date.now(), dirty: true,
           });
           this.index.clearQueuedRename(rename.from);
@@ -270,6 +299,9 @@ export class SyncEngine {
         // Unreadable local bytes: do not attempt a destructive push (and let
         // the scan/pull failures above describe why it is pending).
         if (this.scanFailures.has(path)) continue;
+        // This state's revision still belongs to the source identity until
+        // the queued rename succeeds or is explicitly reconciled.
+        if (this.index.getQueuedRenames().some((rename) => normalizePath(rename.to) === path)) continue;
         const fileExists = await this.adapter.exists(path);
         if (!fileExists) {
           // Local deletion
@@ -382,6 +414,17 @@ export class SyncEngine {
   private async applyRemoteChange(entry: ChangeEntry): Promise<{ conflict: boolean; failed?: boolean }> {
     const path = normalizePath(entry.path);
     if (isIgnored(path, this.excludes) || entry.folder) {
+      if (entry.renamed_from && !entry.deleted && !entry.folder) {
+        const source = normalizePath(entry.renamed_from);
+        const known = this.index.get(source);
+        if (known && known.base_rev > 0 && !isIgnored(source, this.excludes)) {
+          // Persist this observed intent across pagination/restart. A latest-
+          // entry feed can hide source -> ignored -> ignored lineage before
+          // we observe it; this is not a blanket artifact guarantee for such
+          // moves. The source tombstone decides whether it may be removed.
+          this.index.set(source, { ...known, preserve_on_delete: true });
+        }
+      }
       return { conflict: false };
     }
     // Unreadable local bytes make every incoming write for this path unsafe
@@ -389,6 +432,13 @@ export class SyncEngine {
     // paths still make progress.
     if (this.scanFailures.has(path)) {
       return { conflict: false, failed: true };
+    }
+
+    // A local queued destination is not the remote file currently at that
+    // path. Resolve it in phase 2 against the current server destination,
+    // preserving both versions instead of overwriting it during phase 1.
+    if (this.index.getQueuedRenames().some((rename) => normalizePath(rename.to) === path)) {
+      return { conflict: false };
     }
 
     // Follow an advertised rename before handling its source tombstone.
@@ -442,6 +492,7 @@ export class SyncEngine {
         });
         return { conflict: false };
       }
+      let preserved = false;
       if (fileExists) {
         // Destruction is only safe for the exact tracked identity being
         // tombstoned: same lineage (base rev immediately before the tombstone)
@@ -466,10 +517,21 @@ export class SyncEngine {
           this.index.set(path, { ...known, base_rev: entry.rev, base_hash: "", base_path: undefined, dirty: true });
           return { conflict: false };
         }
+        if (known.preserve_on_delete) {
+          const copy = await this.preserveConflict(path, "excluded-rename", await this.adapter.readBinary(path));
+          preserved = true;
+          this.onConflict?.(path, copy);
+          // Creating the artifact awaits I/O: a subsequent local edit must
+          // not be removed merely because the earlier version was preserved.
+          if (await this.localHashOrNull(path) !== currentHash) {
+            this.index.set(path, { ...known, base_rev: entry.rev, base_hash: "", base_path: undefined, dirty: true });
+            return { conflict: true };
+          }
+        }
         await this.adapter.remove(path);
       }
       this.index.remove(path);
-      return { conflict: false };
+      return { conflict: preserved };
     }
 
     // 2. Remote Modification or Creation
