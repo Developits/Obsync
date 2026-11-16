@@ -10,6 +10,7 @@ export interface DistributedSyncSettings {
   autoSync: boolean;
   syncIntervalSeconds: number;
   excludes: string[];
+  localDiagnostics: boolean;
 }
 
 export const DEFAULT_SETTINGS: DistributedSyncSettings = {
@@ -19,6 +20,7 @@ export const DEFAULT_SETTINGS: DistributedSyncSettings = {
   autoSync: true,
   syncIntervalSeconds: 30,
   excludes: [".obsidian", ".trash", ".git"],
+  localDiagnostics: true,
 };
 
 export class DistributedSyncSettingTab extends PluginSettingTab {
@@ -103,6 +105,14 @@ export class DistributedSyncSettingTab extends PluginSettingTab {
       );
 
     containerEl.createEl("h3", { text: "Add Another Device" });
+    new Setting(containerEl)
+      .setName("Local diagnostics")
+      .setDesc("Bounded local-only troubleshooting logs; no note content, paths, credentials, or uploads. Disabling retains existing logs.")
+      .addToggle(toggle => toggle.setValue(this.plugin.settings.localDiagnostics).onChange(async value => {
+        this.plugin.settings.localDiagnostics = value;
+        await this.plugin.saveSettings();
+      }))
+      .addButton(button => button.setButtonText("Export diagnostics").onClick(() => this.plugin.exportDiagnostics()));
     let newDeviceName = "Tablet";
     new Setting(containerEl)
       .setName("New Device Name")
@@ -130,6 +140,7 @@ export class DistributedSyncSettingTab extends PluginSettingTab {
               await navigator.clipboard.writeText(res.token);
               new Notice(`Token for "${newDeviceName}" generated and copied to clipboard! Paste it on your other device.`, 12000);
             } catch (e) {
+              await this.plugin.recordDiagnosticFailure("token_failure", e);
               new Notice(`Failed to generate token: ${e}`);
             } finally {
               btn.setDisabled(false);

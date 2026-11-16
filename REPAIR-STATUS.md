@@ -1,5 +1,21 @@
 # Sequential repair checkpoints
 
+## Current edge-case follow-up (supersedes historical rollout gates below)
+
+Branch: `fix/edge-case-validation`, based on `a40d1dd3c92c79d1e866590223bd8b9916792d0b`. The earlier audit/checkpoints below are preserved as history, not current deployment claims.
+
+The reproduced client and Worker roots were repaired sequentially with per-root RED/GREEN and baseline evidence. Independent client review found three additional recovery defects; those were reproduced, repaired and independently re-reviewed successfully. Current validation: 143/143 automated tests, 32/32 replica stress scenarios, 46/46 actual local Worker scenarios, 33/33 isolated cloud-staging checks, and 21/21 native Linux Obsidian scenarios. Additional independent review probes: 90 Worker checks and 6 client checks passed. Typechecks and packaging pass; generated ZIP bytes match the native-tested bundle.
+
+Evidence and source hashes: `/home/nahid/Obsync-fix-validation/`. Bundle SHA-256: `084df6be928a22f36226b2ebe4a0d3b0761d319be0ca4d4f1dead8d234745ae6`. No production deployment, primary-vault installation, commit/push or release was performed by this follow-up. Android and a backed-up original-vault pilot remain unperformed; compacted unobserved excluded-rename lineage and crash/filesystem trust bounds are explicitly documented in KNOWN-LIMITATIONS.md.
+
+## Local diagnostics follow-up
+
+The frozen diagnostics build passed independent review with no reported security concerns or logic errors, all 165 automated tests (zero skipped), both typechecks, and 33/33 native Linux Obsidian disposable-vault scenarios (12 sync baseline, 13 diagnostics, 8 supplementary). All three ZIPs contain the same verified bundle. Bundle SHA-256: `bdfd881155b8f2df696554d58509810add7e876c750719e644b1fef2adc33c36`.
+
+Evidence: `/home/nahid/Obsync-telemetry-evidence/VALIDATION-STATUS.md`, `resumed-review/verdict.json`, and `resumed-native/REPORT.md`. The parent reran the native aggregate verifier successfully. Sync/index/backend algorithms remain unchanged from the preceding edge-case repair baseline. Privacy/export, attributed errors, lifecycle markers, injected storage faults and bounded flood checks passed within the recorded finite scope; some instrumentation probes use explicit renderer injection. Recurring autosync scheduling, mobile acceptance and an original-vault pilot are not certified by this follow-up. No production deployment or primary-vault installation was performed by this validation.
+
+## Historical original repair checkpoints
+
 Branch: fix/sync-data-safety
 Base: 929dfe0c4e7673e62fb6d11d31456e959c5995b0
 Scope: local source/test changes only. No production deployment or real-vault installation.

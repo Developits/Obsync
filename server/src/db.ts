@@ -564,7 +564,8 @@ export async function purgeDeletedFiles(db: D1Database): Promise<{ files: number
 
 export async function getRetentionDays(db: D1Database): Promise<number> {
   const row = await db.prepare("SELECT value FROM meta WHERE key = 'retention'").first<{ value: string }>();
-  return row ? parseInt(row.value, 10) || 30 : 30;
+  const days = row ? Number(row.value) : NaN;
+  return Number.isSafeInteger(days) && days >= 0 && days <= 36500 ? days : 30;
 }
 
 export async function setRetentionDays(db: D1Database, days: number): Promise<void> {

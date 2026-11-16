@@ -1,7 +1,8 @@
 // Obsidian plugin entrypoint.
 // Connects vault filesystem events, status bar UI, commands, and scheduled sync cycles.
 
-import { Notice, Plugin, TAbstractFile, TFile, requestUrl } from "obsidian";
+import { Notice, Plugin, TAbstractFile, TFile, requestUrl, apiVersion, Platform } from "obsidian";
+import { LocalDiagnostics, safeError } from "./diagnostics";
 import { SyncClient } from "./api";
 import { LocalIndex, type StorageAdapter } from "./index-store";
 import { isIgnored, normalizePath } from "./paths";
@@ -18,9 +19,14 @@ export default class DistributedSyncPlugin extends Plugin {
   private debounceTimer: number | null = null;
   private syncTimer: number | null = null;
   private startupTimer: number | null = null;
+  private diagnostics: LocalDiagnostics | null = null;
+  private diagnosticsConfiguration: Promise<void> = Promise.resolve();
+  private unloading = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    await this.configureDiagnostics();
+    this.addCommand({id:"export-diagnostics", name:"Export local diagnostics", callback:() => this.exportDiagnostics()});
 
     // Initialize local index
     const storageAdapter: StorageAdapter = {
@@ -41,7 +47,12 @@ export default class DistributedSyncPlugin extends Plugin {
     };
 
     this.index = new LocalIndex(storageAdapter, "state.json");
-    await this.index.load();
+    try {
+      await this.index.load();
+    } catch (error) {
+      await this.recordDiagnosticFailure("startup_failure", error);
+      throw error;
+    }
 
     this.setupEngine();
 
@@ -76,6 +87,7 @@ export default class DistributedSyncPlugin extends Plugin {
           const stats = await this.client.stats();
           new Notice(`Sync online: ${stats.files} files on server (seq: ${stats.seq})`);
         } catch (e) {
+          await this.recordDiagnosticFailure("status_failure", e);
           new Notice(`Sync server error: ${e}`);
         }
       },
@@ -99,7 +111,16 @@ export default class DistributedSyncPlugin extends Plugin {
       this.settings.serverUrl,
       this.settings.token,
       this.settings.deviceName,
-      requestUrl
+      async (params) => {
+        try {
+          const response = await requestUrl(params);
+          if (response.status >= 400) this.diagnostics?.log("api_failure", {category:"api", status:response.status});
+          return response;
+        } catch (error) {
+          this.diagnostics?.log("api_failure", safeError(error));
+          throw error;
+        }
+      }
     );
 
     const vaultAdapter: VaultAdapter = {
@@ -152,6 +173,7 @@ export default class DistributedSyncPlugin extends Plugin {
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
+    await this.configureDiagnostics();
     this.setupEngine();
     this.setupAutoSync();
   }
@@ -190,12 +212,49 @@ export default class DistributedSyncPlugin extends Plugin {
     }
   }
 
-  onunload(): void {
+  onunload(): Promise<void> {
+    this.unloading = true;
     this.clearAutoSync();
     if (this.debounceTimer !== null) {
       window.clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
+    // Obsidian may not await unload: abrupt process termination can lose this flush.
+    return this.diagnostics?.close() ?? Promise.resolve();
+  }
+
+  private configureDiagnostics(): Promise<void> {
+    const update = () => this.updateDiagnostics();
+    this.diagnosticsConfiguration = this.diagnosticsConfiguration.then(update, update);
+    return this.diagnosticsConfiguration;
+  }
+
+  private async updateDiagnostics(): Promise<void> {
+    if (!this.settings.localDiagnostics || this.unloading) {
+      await this.diagnostics?.close();
+      this.diagnostics = null;
+      return;
+    }
+    if (this.diagnostics) return;
+    this.diagnostics = new LocalDiagnostics(this.app.vault.adapter, {
+      pluginVersion:this.manifest?.version, obsidianVersion:apiVersion,
+      platform:Platform?.isMobile ? "mobile" : Platform?.isDesktop ? "desktop" : "unknown",
+      onFailure:() => { new Notice("Local sync diagnostics unavailable. Sync is unaffected; diagnostic export may be incomplete.", 8000); },
+    });
+    this.diagnostics.attachGlobalHandlers(window);
+    await this.diagnostics.start();
+  }
+
+  async recordDiagnosticFailure(event: "startup_failure" | "status_failure" | "token_failure", error: unknown): Promise<void> {
+    this.diagnostics?.log(event, safeError(error));
+    await this.diagnostics?.flush();
+  }
+
+  async exportDiagnostics(): Promise<void> {
+    if (!this.diagnostics) { new Notice("Local sync diagnostics are disabled. Enable them in settings before exporting."); return; }
+    const result = await this.diagnostics.export();
+    if (!result.path) new Notice("Diagnostic export failed: local storage unavailable.", 10000);
+    else new Notice(`Diagnostic export${result.unavailable ? " incomplete (local storage unavailable)" : " saved"}: ${result.path}. Review before sharing; nothing was uploaded.`, 15000);
   }
 
   private updateStatus(status: "idle" | "syncing" | "conflict" | "error" | "pending", details?: string): void {
@@ -228,9 +287,12 @@ export default class DistributedSyncPlugin extends Plugin {
 
     this.isSyncing = true;
     this.updateStatus("syncing");
+    this.diagnostics?.log("sync_start");
 
     try {
       const res = await this.engine.sync();
+      this.diagnostics?.log("sync_result", {pulled:res.pulled, pushed:res.pushed, conflicts:res.conflicts, failed:res.failed, pending:res.pending});
+      for (const failure of res.errors) this.diagnostics?.log("sync_failure", {operation:failure.operation, category:"unknown"});
       if (res.failed > 0) {
         this.updateStatus("error", `${res.failed} failed`);
       } else if (res.conflicts > 0) {
@@ -248,11 +310,12 @@ export default class DistributedSyncPlugin extends Plugin {
         new Notice(`Sync complete: ${parts.join(", ")}`);
       }
     } catch (e) {
-      console.error("Sync error:", e);
+      this.diagnostics?.log("sync_exception", safeError(e));
       this.updateStatus("error");
       if (manual) new Notice(`Sync failed: ${e}`);
     } finally {
       this.isSyncing = false;
+      await this.diagnostics?.flush();
     }
   }
 

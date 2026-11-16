@@ -1,25 +1,28 @@
-# Known limitations of the 1.0.1 repair candidate
+# Known limitations of the edge-case repair candidate
 
-The original audit's 13 issue groups have repairs and regression coverage. That is a bounded acceptance claim, not proof that every possible sync interleaving is correct. Independent reviews passed the audited changes but recorded the following legacy behaviors and unverified cases.
+This working-tree candidate is on `fix/edge-case-validation`, based on a40d1dd. It is not the same bytes as the previously deployed production Worker or a previously published 1.0.1 plugin. Version labels alone do not identify this build; use the validation manifest and bundle hashes.
 
-## Non-blocking legacy behaviors reported by independent review
+## Reproduced defects repaired and revalidated
 
-- A queued local rename can encounter a different remote file at its intended destination. The existing reconciliation policy may replace the local destination/rename intent while retaining recoverable bytes at the old server path and/or a conflict copy. The reviewer reproduced this on both the original base and the repaired snapshot; it is not certified as a clean identity-preserving rename.
-- A remote rename into a destination excluded by another device may remove that device's old local path without creating a local artifact; the remote bytes remain at the excluded destination. This differs from a LOCAL move into an excluded path, whose accidental remote deletion is fixed and tested.
-- One narrow semantic rename-conflict branch can retain a historical base_path while advancing a destination revision. The reviewer identified this by inspection, not a demonstrated new loss case. Broader rename-lineage tests are still appropriate.
-- Corrupt local index recovery and interrupted state-save/mutation races need additional fault-injection/restart coverage. Current load behavior can reset an unreadable index; the new save-failure reporting does not claim to solve arbitrary state-file corruption.
+- Queued rename destinations are protected from incoming overwrite/deletion and premature upload until rename success or explicit conflict reconciliation. Both intended local bytes and unrelated remote destination bytes are preserved in the tested collision cases.
+- Semantic rename conflict rebases the historical path/revision tuple together.
+- An observed remote rename into an excluded destination records durable preservation intent and creates a visible, non-overwriting artifact before deleting the tracked source. Artifact-write failure leaves the source retryable; successful artifacts increment the conflict count.
+- Index writes are serialized and mutation-version guarded. A save publishes identical backup/primary snapshots with persisted generations. Loading selects the newest valid snapshot, validates persisted fields, and fails closed if neither existing copy is usable. Recovery preserves queued intent and divergent historical-base bytes; failed recovery blocks dependent renames and durable per-entry progress prevents duplicates on ordinary retries.
+- Worker single-range handling, JSON/object validation, strict numeric inputs, retention bounds/readback and safe relative canonical path publication have behavioral regression coverage. Retention is an integer from 0 through 36500 days. Invalid requests are rejected before metadata mutation.
 
-These are disclosed follow-up items, not silently reclassified as passing test scenarios. Until they are addressed or explicitly accepted as policy, use a staging vault and independent backups rather than a primary-vault rollout.
+All repaired roots passed scoped independent review, the 143-test automated suite, actual local Worker/D1/R2 testing, isolated Cloudflare staging, and native Linux fake-vault acceptance. Evidence: `/home/nahid/Obsync-fix-validation/`. These are bounded tests, not proof of every interleaving or device environment.
 
-## Deliberate scope and policy boundaries
+## Remaining policy and implementation boundaries
 
-- Folder structure is derived from file paths; empty folders are not synchronized.
-- .obsidian and other excluded paths do not synchronize. Device credentials are local and must remain excluded.
-- Uncertain rename lineage may be preserved as independent branches instead of guessing file identity.
-- Conflict name reservations protect concurrent operations within one SyncEngine. They are not OS-level exclusive creation against unrelated processes or multiple independent engines.
-- The server uses one shared vault/access domain. Device tokens can enroll peers. No separate admin role, device-revocation UI or client-side end-to-end encryption was added.
-- Rejected uploads can leave content-addressed R2 blobs; garbage collection and complete retention/purge semantics were not redesigned.
-- Local workerd/D1/R2, in-process tests and native Linux Obsidian checks do not establish cloud-staging, Android suspension/resume or S Pen PDF annotation behavior. Those acceptance gates remain unperformed.
-- CI is configured and locally simulated; no remote Actions run, tag publication, Cloudflare deployment or installation into Nebulae occurred.
+- The changes feed stores latest file states, not immutable rename history. A `source -> excluded -> excluded` chain completed before a receiver pulls can hide the original rename advertisement. The visible-artifact guarantee is limited to an observed advertisement; in the reproduced unobserved case bytes remain remotely available, but no visible local artifact is guaranteed.
+- Storage durability follows successful adapter writes. No fsync, OS-level transaction or crash-atomic transaction spanning artifact creation and index persistence is claimed. Loss/corruption of both index snapshots fails closed; it cannot reconstruct arbitrary unjournaled operations.
+- Server validation rejects newly published unsafe paths, but does not migrate historical unsafe keys. Client-side explicit vault-root confinement against hostile or historical remote path values remains a separate hardening concern; no filesystem-escape exploit was established or attempted.
+- Folder structure is derived from file paths; empty folders are not synchronized. `.obsidian` and other exclusions do not synchronize. Credentials stay local and excluded.
+- Uncertain lineage may become independently preserved branches. Conflict-name reservations protect one SyncEngine, not unrelated filesystem writers or multiple engines.
+- The backend has one shared vault/access domain. Device tokens can enroll peers; no separate admin role, device-revocation UI or client-side end-to-end encryption was added.
+- Rejected uploads can leave content-addressed R2 blobs. Garbage collection and complete retention/purge semantics were not redesigned.
+- Native acceptance is Linux Obsidian 1.15.1. Android suspension/resume, phone/tablet filesystems and S Pen PDF annotation behavior remain untested.
 
-Do not push the historical v1.0.0 tag expecting these fixes. Version 1.0.1 is the new local repair candidate; old release history is preserved.
+## Rollout state
+
+The repaired build was deployed only to the separate synthetic staging Worker `obsync-qa-20261115163850`. This repair task did not update production, install into Nebulae, push a branch/tag or publish a release. A backed-up original-vault pilot requires an explicit rollout step; do not infer it from passing fake-vault tests. Temporary cloud test resources remain because cleanup approval timed out; deletion was not retried.
