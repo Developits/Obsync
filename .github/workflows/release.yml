@@ -3,7 +3,8 @@ name: Release Plugin
 on:
   push:
     tags:
-      - "v*"
+      # Obsidian requires the tag to match manifest.json exactly (1.1.0, not v1.1.0).
+      - "[0-9]*"
   workflow_dispatch:
 
 permissions:
@@ -22,6 +23,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
+
+      - name: Verify tag matches manifest version
+        run: |
+          VERSION=$(node -p "require('./manifest.json').version")
+          if [ "${{ github.ref_type }}" = "tag" ] && [ "${{ github.ref_name }}" != "$VERSION" ]; then
+            echo "Release tag must match manifest.json version exactly: $VERSION"
+            exit 1
+          fi
 
       - name: Install dependencies
         run: |
@@ -44,7 +53,7 @@ jobs:
             echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
           else
             VERSION=$(node -p "require('./manifest.json').version")
-            echo "tag=v${VERSION}" >> $GITHUB_OUTPUT
+            echo "tag=${VERSION}" >> $GITHUB_OUTPUT
           fi
 
       - name: Create GitHub Release
