@@ -7,7 +7,7 @@ Distributed Sync keeps **local-only** troubleshooting records by default. There 
 Run **Distributed Sync: Export local diagnostics** from the command palette, or click **Export diagnostics** in the plugin's settings. A notice shows the vault-relative output location:
 
 ```
-.obsidian/plugins/obsidian-distributed-sync/diagnostics/export.json
+.obsidian/plugins/distributed-sync/diagnostics/export.json
 ```
 
 Review that file before manually attaching it to a bug report. Export overwrites the same file; it does not create an ever-growing collection. A failed export is explicitly reported. An incomplete export has `diagnosticsUnavailable: true` and a warning notice; it must not be treated as a complete record.

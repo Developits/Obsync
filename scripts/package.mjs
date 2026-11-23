@@ -9,10 +9,10 @@ import { makeZip } from "./zip.mjs";
 const rootDir = process.cwd();
 const pluginDir = path.join(rootDir, "plugin");
 const distDir = path.join(rootDir, "dist");
-const manifestPath = path.join(pluginDir, "manifest.json");
+const manifestPath = path.join(rootDir, "manifest.json");
 
 if (!fs.existsSync(manifestPath)) {
-  console.error("Missing plugin/manifest.json");
+  console.error("Missing manifest.json in the repository root");
   process.exit(1);
 }
 
@@ -34,11 +34,11 @@ fs.mkdirSync(distDir, { recursive: true });
 const stageDir = path.join(distDir, pluginId);
 fs.mkdirSync(stageDir, { recursive: true });
 fs.copyFileSync(path.join(pluginDir, "main.js"), path.join(stageDir, "main.js"));
-fs.copyFileSync(path.join(pluginDir, "manifest.json"), path.join(stageDir, "manifest.json"));
+fs.copyFileSync(manifestPath, path.join(stageDir, "manifest.json"));
 
 // Also copy loose assets for Obsidian/BRAT release requirements
 fs.copyFileSync(path.join(pluginDir, "main.js"), path.join(distDir, "main.js"));
-fs.copyFileSync(path.join(pluginDir, "manifest.json"), path.join(distDir, "manifest.json"));
+fs.copyFileSync(manifestPath, path.join(distDir, "manifest.json"));
 
 // 4. Create deterministic ZIPs without platform-specific tar behavior.
 // Standard zip with folder (extract directly into .obsidian/plugins/)
@@ -47,7 +47,7 @@ const genericZip = `${pluginId}.zip`;
 const versionedZipPath = path.join(distDir, versionedZip);
 const genericZipPath = path.join(distDir, genericZip);
 
-// Flat zip without parent folder (extract directly into .obsidian/plugins/obsidian-distributed-sync/)
+// Flat zip without parent folder (extract directly into .obsidian/plugins/distributed-sync/)
 const flatZip = `${pluginId}-flat.zip`;
 const flatZipPath = path.join(distDir, flatZip);
 

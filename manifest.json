@@ -1,0 +1,10 @@
+{
+  "id": "distributed-sync",
+  "name": "Distributed Sync",
+  "version": "1.1.0",
+  "minAppVersion": "1.7.2",
+  "description": "Sync your Obsidian vault across devices through your own Cloudflare Worker, with three-way merges and conflict files.",
+  "author": "Nahid",
+  "authorUrl": "https://github.com/Developits",
+  "isDesktopOnly": false
+}

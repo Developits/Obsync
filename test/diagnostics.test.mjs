@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 const module = await import('../plugin/src/diagnostics.ts').catch(() => null);
-const ROOT = '.obsidian/plugins/obsidian-distributed-sync/diagnostics';
+const ROOT = '.obsidian/plugins/distributed-sync/diagnostics';
 function memory() {
   const files = new Map(), reads = [];
   return {files, reads,
@@ -25,7 +25,7 @@ test('local JSONL diagnostics strictly allowlist metadata, events, fields and sa
   await d.start();
   const secret = 'PRIVATE_TOKEN /home/user/Secret.md note-content https://private.example';
   const e = Object.assign(new TypeError(secret), {code:'ENOSPC', status:503});
-  e.stack = `TypeError: ${secret}\n at privateFunction (plugin:obsidian-distributed-sync:42:9)\n at other (plugin:other-plugin:2:3)`;
+  e.stack = `TypeError: ${secret}\n at privateFunction (plugin:distributed-sync:42:9)\n at other (plugin:other-plugin:2:3)`;
   d.log('sync_failure', {operation:'push', failed:2, message:secret, path:secret, token:secret, ...module.safeError(e)});
   d.log(secret, {message:secret});
   await d.flush();
@@ -87,7 +87,7 @@ test('export revalidates prior files, strips unknown fields and skips malformed/
 
 test('installed build SHA256 hashes exact bounded bundle bytes and unavailable identity is explicit', async () => {
   const a=memory(); const bundle=new TextEncoder().encode('/* exact installed bytes 秘密 */');
-  a.files.set('.obsidian/plugins/obsidian-distributed-sync/main.js',new TextDecoder().decode(bundle));
+  a.files.set('.obsidian/plugins/distributed-sync/main.js',new TextDecoder().decode(bundle));
   a.readBinary=async()=>bundle.buffer;
   const d=make(a);await d.start();const result=await d.export();
   const {createHash}=await import('node:crypto');
@@ -123,10 +123,10 @@ test('global handlers capture only attributable plugin frames, exclude message l
   const a=memory(),d=make(a);await d.start();
   const target=new EventTarget();d.attachGlobalHandlers(target);
   function dispatch(type,props){const e=new Event(type);Object.assign(e,props);target.dispatchEvent(e);}
-  const own=Object.assign(new Error('CANARY'),{stack:'Error: CANARY\n at secretFunction (plugin:obsidian-distributed-sync:80:3)'});
+  const own=Object.assign(new Error('CANARY'),{stack:'Error: CANARY\n at secretFunction (plugin:distributed-sync:80:3)'});
   dispatch('error',{error:own});dispatch('unhandledrejection',{reason:own});
-  dispatch('error',{filename:'plugin:obsidian-distributed-sync',lineno:90,colno:2});
-  dispatch('error',{error:{stack:'Error: plugin:obsidian-distributed-sync:1:2\n at another (plugin:unrelated:5:1)'}});
+  dispatch('error',{filename:'plugin:distributed-sync',lineno:90,colno:2});
+  dispatch('error',{error:{stack:'Error: plugin:distributed-sync:1:2\n at another (plugin:unrelated:5:1)'}});
   dispatch('unhandledrejection',{reason:{stack:'Error CANARY\n at another (plugin:unrelated:5:1)'}});
   await d.flush();
   assert.equal(records(a).filter(r=>r.event==='global_error').length,2);
@@ -149,9 +149,9 @@ test('restart caps normalized rows even when compact numeric JSON expands', asyn
 test('global attribution uses throwing source, never function text or another plugin caller chain', async () => {
   const a=memory(),d=make(a);await d.start();const target=new EventTarget();d.attachGlobalHandlers(target);
   for(const stack of [
-    'Error: other\n at plugin:obsidian-distributed-sync:9:8 (plugin:unrelated:1:2)',
-    'Error: other\n at fail (plugin:unrelated:1:2)\n at caller (plugin:obsidian-distributed-sync:9:8)',
-    'Error: other\n at fail (https://other/plugin:obsidian-distributed-sync:9:8)',
+    'Error: other\n at plugin:distributed-sync:9:8 (plugin:unrelated:1:2)',
+    'Error: other\n at fail (plugin:unrelated:1:2)\n at caller (plugin:distributed-sync:9:8)',
+    'Error: other\n at fail (https://other/plugin:distributed-sync:9:8)',
   ]){const e=new Event('error');e.error={stack};target.dispatchEvent(e);}
   await d.flush();assert.equal(records(a).filter(r=>r.event==='global_error').length,0);await d.close();
 });
@@ -166,7 +166,7 @@ test('close during asynchronous startup leaves a closed marker and does not reop
 
 test('unknown throwing-frame formats fail closed instead of attributing a later own-plugin caller', async()=>{
  const a=memory(),d=make(a);await d.start();const target=new EventTarget();d.attachGlobalHandlers(target);
- const e=new Event('error');e.error={stack:'Error: foreign\n at foreignThrow (foreign plugin.js:1:32)\n at plugin:obsidian-distributed-sync:1:1'};target.dispatchEvent(e);
+ const e=new Event('error');e.error={stack:'Error: foreign\n at foreignThrow (foreign plugin.js:1:32)\n at plugin:distributed-sync:1:1'};target.dispatchEvent(e);
  await d.flush();assert.equal(records(a).filter(r=>r.event==='global_error').length,0);await d.close();
 });
 

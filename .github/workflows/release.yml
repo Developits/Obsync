@@ -43,7 +43,7 @@ jobs:
           if [ "${{ github.ref_type }}" = "tag" ]; then
             echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
           else
-            VERSION=$(node -p "require('./plugin/manifest.json').version")
+            VERSION=$(node -p "require('./manifest.json').version")
             echo "tag=v${VERSION}" >> $GITHUB_OUTPUT
           fi
 

@@ -31,14 +31,14 @@ export default class DistributedSyncPlugin extends Plugin {
     // Initialize local index
     const storageAdapter: StorageAdapter = {
       read: async (path: string) => {
-        const fullPath = `.obsidian/plugins/obsidian-distributed-sync/${path}`;
+        const fullPath = `.obsidian/plugins/distributed-sync/${path}`;
         const exists = await this.app.vault.adapter.exists(fullPath);
         if (!exists) return null;
         return await this.app.vault.adapter.read(fullPath);
       },
       write: async (path: string, data: string) => {
-        const fullPath = `.obsidian/plugins/obsidian-distributed-sync/${path}`;
-        const dir = ".obsidian/plugins/obsidian-distributed-sync";
+        const fullPath = `.obsidian/plugins/distributed-sync/${path}`;
+        const dir = ".obsidian/plugins/distributed-sync";
         if (!(await this.app.vault.adapter.exists(dir))) {
           await this.app.vault.adapter.mkdir(dir);
         }
@@ -156,9 +156,6 @@ export default class DistributedSyncPlugin extends Plugin {
       },
       onProgress: (current, total) => {
         this.updateStatus("syncing", `${current}/${total}`);
-      },
-      onLog: (msg) => {
-        console.log(`[DistributedSync] ${msg}`);
       },
     });
   }

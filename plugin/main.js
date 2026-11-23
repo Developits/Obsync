@@ -31,7 +31,7 @@ module.exports = __toCommonJS(main_exports);
 var import_obsidian2 = require("obsidian");
 
 // src/diagnostics.ts
-var DIAGNOSTICS_DIR = ".obsidian/plugins/obsidian-distributed-sync/diagnostics";
+var DIAGNOSTICS_DIR = ".obsidian/plugins/distributed-sync/diagnostics";
 var EVENTS = /* @__PURE__ */ new Set(["session_start", "session_stop", "previous_session_unclean", "marker_invalid", "sync_start", "sync_result", "sync_failure", "sync_exception", "startup_failure", "status_failure", "token_failure", "api_failure", "global_error", "unhandled_rejection", "queue_overflow"]);
 var OPERATIONS = /* @__PURE__ */ new Set(["scan", "pull", "push", "save"]);
 var CATEGORIES = /* @__PURE__ */ new Set(["error", "type", "range", "syntax", "reference", "api", "conflict", "unknown"]);
@@ -57,7 +57,7 @@ function stackLocations(stack) {
   return locations;
 }
 function ownSource(source) {
-  return /^(?:plugin:obsidian-distributed-sync|(?:app:\/\/[^\s]+\/)?\.obsidian\/plugins\/obsidian-distributed-sync\/main\.js)$/.test(source);
+  return /^(?:plugin:distributed-sync|(?:app:\/\/[^\s]+\/)?\.obsidian\/plugins\/distributed-sync\/main\.js)$/.test(source);
 }
 function pluginFrames(stack) {
   return stackLocations(stack).filter((f) => f.own).slice(0, 5).map((f) => ({ line: f.line, column: f.column }));
@@ -271,7 +271,7 @@ var LocalDiagnostics = class {
   async identifyBuild() {
     try {
       if (!this.adapter.readBinary) return;
-      const path = ".obsidian/plugins/obsidian-distributed-sync/main.js";
+      const path = ".obsidian/plugins/distributed-sync/main.js";
       const stat = await this.adapter.stat(path);
       if (!stat || !Number.isSafeInteger(stat.size) || stat.size < 0 || stat.size > 4 * 1024 * 1024) return;
       const data = await this.adapter.readBinary(path);
@@ -743,32 +743,31 @@ var DistributedSyncSettingTab = class extends import_obsidian.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Distributed Sync Settings" });
     new import_obsidian.Setting(containerEl).setName("Server URL").setDesc("The URL of your Cloudflare Worker sync server (e.g., https://sync.example.workers.dev)").addText(
       (text) => text.setPlaceholder("http://localhost:8787").setValue(this.plugin.settings.serverUrl).onChange(async (val) => {
         this.plugin.settings.serverUrl = val.trim().replace(/\s+/g, "");
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Device Token").setDesc("Bearer authentication token for this device").addText(
+    new import_obsidian.Setting(containerEl).setName("Device token").setDesc("Bearer authentication token for this device").addText(
       (text) => text.setPlaceholder("obs_...").setValue(this.plugin.settings.token).onChange(async (val) => {
         this.plugin.settings.token = val.trim();
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Device Name").setDesc("Name used to identify this device in conflict copies and logs").addText(
+    new import_obsidian.Setting(containerEl).setName("Device name").setDesc("Name used to identify this device in conflict copies and logs").addText(
       (text) => text.setPlaceholder("Laptop").setValue(this.plugin.settings.deviceName).onChange(async (val) => {
         this.plugin.settings.deviceName = val.trim();
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Auto Sync").setDesc("Automatically sync changes in background when editing notes").addToggle(
+    new import_obsidian.Setting(containerEl).setName("Auto sync").setDesc("Automatically sync changes in the background when editing notes").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.autoSync).onChange(async (val) => {
         this.plugin.settings.autoSync = val;
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian.Setting(containerEl).setName("Sync Interval (seconds)").setDesc("How often to check for remote updates in background").addText(
+    new import_obsidian.Setting(containerEl).setName("Sync interval (seconds)").setDesc("How often to check for remote updates in the background").addText(
       (text) => text.setPlaceholder("30").setValue(String(this.plugin.settings.syncIntervalSeconds)).onChange(async (val) => {
         const num = parseInt(val, 10);
         if (!isNaN(num) && num >= 5) {
@@ -777,18 +776,19 @@ var DistributedSyncSettingTab = class extends import_obsidian.PluginSettingTab {
         }
       })
     );
-    containerEl.createEl("h3", { text: "Add Another Device" });
+    new import_obsidian.Setting(containerEl).setName("Diagnostics").setHeading();
     new import_obsidian.Setting(containerEl).setName("Local diagnostics").setDesc("Bounded local-only troubleshooting logs; no note content, paths, credentials, or uploads. Disabling retains existing logs.").addToggle((toggle) => toggle.setValue(this.plugin.settings.localDiagnostics).onChange(async (value) => {
       this.plugin.settings.localDiagnostics = value;
       await this.plugin.saveSettings();
     })).addButton((button) => button.setButtonText("Export diagnostics").onClick(() => this.plugin.exportDiagnostics()));
+    new import_obsidian.Setting(containerEl).setName("Add another device").setHeading();
     let newDeviceName = "Tablet";
-    new import_obsidian.Setting(containerEl).setName("New Device Name").setDesc("Generate an authenticated token for your phone, tablet, or another computer").addText(
+    new import_obsidian.Setting(containerEl).setName("New device name").setDesc("Generate an authenticated token for your phone, tablet, or another computer").addText(
       (text) => text.setPlaceholder("Tablet").setValue(newDeviceName).onChange((val) => {
         newDeviceName = val.trim();
       })
     ).addButton(
-      (btn) => btn.setButtonText("Generate Token").setCta().onClick(async () => {
+      (btn) => btn.setButtonText("Generate token").setCta().onClick(async () => {
         if (!this.plugin.settings.token) {
           new import_obsidian.Notice("Cannot mint token: this device is not connected yet.");
           return;
@@ -1604,14 +1604,14 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
     this.addCommand({ id: "export-diagnostics", name: "Export local diagnostics", callback: () => this.exportDiagnostics() });
     const storageAdapter = {
       read: async (path) => {
-        const fullPath = `.obsidian/plugins/obsidian-distributed-sync/${path}`;
+        const fullPath = `.obsidian/plugins/distributed-sync/${path}`;
         const exists = await this.app.vault.adapter.exists(fullPath);
         if (!exists) return null;
         return await this.app.vault.adapter.read(fullPath);
       },
       write: async (path, data) => {
-        const fullPath = `.obsidian/plugins/obsidian-distributed-sync/${path}`;
-        const dir = ".obsidian/plugins/obsidian-distributed-sync";
+        const fullPath = `.obsidian/plugins/distributed-sync/${path}`;
+        const dir = ".obsidian/plugins/distributed-sync";
         if (!await this.app.vault.adapter.exists(dir)) {
           await this.app.vault.adapter.mkdir(dir);
         }
@@ -1711,9 +1711,6 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
       },
       onProgress: (current, total) => {
         this.updateStatus("syncing", `${current}/${total}`);
-      },
-      onLog: (msg) => {
-        console.log(`[DistributedSync] ${msg}`);
       }
     });
   }

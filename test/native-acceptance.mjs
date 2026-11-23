@@ -6,10 +6,10 @@ const out=process.env.NATIVE_EVIDENCE_DIR;
 if(!out)throw Error('Set NATIVE_EVIDENCE_DIR to a private test-evidence directory');
 await fs.mkdir(out,{recursive:true});
 const a=await connect(9223),b=await connect(9224),results=[];
-const ev=(c,code)=>c.evaluate(`(async()=>{const p=app.plugins.plugins['obsidian-distributed-sync'];${code.replaceAll('\n','\\n')}})()`);
+const ev=(c,code)=>c.evaluate(`(async()=>{const p=app.plugins.plugins['distributed-sync'];${code.replaceAll('\n','\\n')}})()`);
 for(const [c,name] of [[a,'Obsync-QA-A'],[b,'Obsync-QA-B']]){
  assert.equal(await c.evaluate('app.vault.getName()'),name,'Refusing a non-QA vault');
- assert.equal(await c.evaluate("!!app.plugins.plugins['obsidian-distributed-sync']"),true,'QA plugin must be enabled before running acceptance');
+ assert.equal(await c.evaluate("!!app.plugins.plugins['distributed-sync']"),true,'QA plugin must be enabled before running acceptance');
 }
 const sync=(c)=>ev(c,'await p.triggerSync(true);return {status:p.statusBarItem.innerText};');
 const get=(c,path)=>ev(c,`return await app.vault.adapter.read(${JSON.stringify(path)});`);

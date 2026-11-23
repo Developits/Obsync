@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {createRequire} from 'node:module';
 const require=createRequire(import.meta.url),{build}=require('../plugin/node_modules/esbuild');
-const ROOT='.obsidian/plugins/obsidian-distributed-sync/diagnostics';
+const ROOT='.obsidian/plugins/distributed-sync/diagnostics';
 const notices=[];
 class Plugin {
   constructor(){this.commands=[];this.manifest={version:'1.0.1'};this._data={autoSync:false,token:'SECRET_TOKEN',deviceName:'SECRET_DEVICE',serverUrl:'https://SECRET_SERVER'};}
@@ -13,7 +13,7 @@ class Plugin {
 }
 const buttons=[];
 class Setting {
- constructor(){this.name='';}setName(n){this.name=n;return this;}setDesc(){return this;}
+ constructor(){this.name='';}setName(n){this.name=n;return this;}setHeading(){return this;}setDesc(){return this;}
  addText(fn){fn({setPlaceholder(){return this;},setValue(){return this;},onChange(){return this;}});return this;}
  addToggle(fn){fn({setValue(){return this;},onChange(){return this;}});return this;}
  addButton(fn){const b={name:this.name,setButtonText(t){this.text=t;return this;},setCta(){return this;},setDisabled(){return this;},onClick(cb){this.click=cb;return this;}};buttons.push(b);fn(b);return this;}
@@ -55,7 +55,7 @@ test('bundled plugin records sanitized sync exceptions, API/status and token fai
  await p.commands.find(c=>c.id==='check-status').callback();
  assert.equal(rows(files).find(r=>r.event==='status_failure').status,503);
  assert.equal(rows(files).find(r=>r.event==='api_failure').status,503);
- p.tab.display();await buttons.findLast(b=>b.text==='Generate Token').click();
+ p.tab.display();await buttons.findLast(b=>b.text==='Generate token').click();
  assert.equal(rows(files).find(r=>r.event==='token_failure').status,503);
  assert.ok(![...files.values()].join('').includes('SECRET_TOKEN'));await p.onunload();
 });

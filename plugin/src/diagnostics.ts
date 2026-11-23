@@ -1,5 +1,5 @@
 // Local-only diagnostics. Never pass free-form messages or note identifiers to disk.
-export const DIAGNOSTICS_DIR = ".obsidian/plugins/obsidian-distributed-sync/diagnostics";
+export const DIAGNOSTICS_DIR = ".obsidian/plugins/distributed-sync/diagnostics";
 const EVENTS = new Set(["session_start", "session_stop", "previous_session_unclean", "marker_invalid", "sync_start", "sync_result", "sync_failure", "sync_exception", "startup_failure", "status_failure", "token_failure", "api_failure", "global_error", "unhandled_rejection", "queue_overflow"]);
 const OPERATIONS = new Set(["scan", "pull", "push", "save"]);
 const CATEGORIES = new Set(["error", "type", "range", "syntax", "reference", "api", "conflict", "unknown"]);
@@ -44,7 +44,7 @@ function stackLocations(stack: unknown): {own: boolean; line: number; column: nu
   return locations;
 }
 function ownSource(source: string): boolean {
-  return /^(?:plugin:obsidian-distributed-sync|(?:app:\/\/[^\s]+\/)?\.obsidian\/plugins\/obsidian-distributed-sync\/main\.js)$/.test(source);
+  return /^(?:plugin:distributed-sync|(?:app:\/\/[^\s]+\/)?\.obsidian\/plugins\/distributed-sync\/main\.js)$/.test(source);
 }
 export function pluginFrames(stack: unknown): {line: number; column: number}[] {
   return stackLocations(stack).filter(f => f.own).slice(0, 5).map(f => ({line:f.line,column:f.column}));
@@ -220,7 +220,7 @@ export class LocalDiagnostics {
     // Read the installed bytes, not Git HEAD (the working tree may be dirty).
     try {
       if (!this.adapter.readBinary) return;
-      const path = ".obsidian/plugins/obsidian-distributed-sync/main.js";
+      const path = ".obsidian/plugins/distributed-sync/main.js";
       const stat = await this.adapter.stat(path);
       if (!stat || !Number.isSafeInteger(stat.size) || stat.size < 0 || stat.size > 4 * 1024 * 1024) return;
       const data = await this.adapter.readBinary(path);

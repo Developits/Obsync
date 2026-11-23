@@ -35,8 +35,6 @@ export class DistributedSyncSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    containerEl.createEl("h2", { text: "Distributed Sync Settings" });
-
     new Setting(containerEl)
       .setName("Server URL")
       .setDesc("The URL of your Cloudflare Worker sync server (e.g., https://sync.example.workers.dev)")
@@ -51,7 +49,7 @@ export class DistributedSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Device Token")
+      .setName("Device token")
       .setDesc("Bearer authentication token for this device")
       .addText((text) =>
         text
@@ -64,7 +62,7 @@ export class DistributedSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Device Name")
+      .setName("Device name")
       .setDesc("Name used to identify this device in conflict copies and logs")
       .addText((text) =>
         text
@@ -77,8 +75,8 @@ export class DistributedSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Auto Sync")
-      .setDesc("Automatically sync changes in background when editing notes")
+      .setName("Auto sync")
+      .setDesc("Automatically sync changes in the background when editing notes")
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.autoSync)
@@ -89,8 +87,8 @@ export class DistributedSyncSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Sync Interval (seconds)")
-      .setDesc("How often to check for remote updates in background")
+      .setName("Sync interval (seconds)")
+      .setDesc("How often to check for remote updates in the background")
       .addText((text) =>
         text
           .setPlaceholder("30")
@@ -104,7 +102,7 @@ export class DistributedSyncSettingTab extends PluginSettingTab {
           })
       );
 
-    containerEl.createEl("h3", { text: "Add Another Device" });
+    new Setting(containerEl).setName("Diagnostics").setHeading();
     new Setting(containerEl)
       .setName("Local diagnostics")
       .setDesc("Bounded local-only troubleshooting logs; no note content, paths, credentials, or uploads. Disabling retains existing logs.")
@@ -113,9 +111,11 @@ export class DistributedSyncSettingTab extends PluginSettingTab {
         await this.plugin.saveSettings();
       }))
       .addButton(button => button.setButtonText("Export diagnostics").onClick(() => this.plugin.exportDiagnostics()));
+
+    new Setting(containerEl).setName("Add another device").setHeading();
     let newDeviceName = "Tablet";
     new Setting(containerEl)
-      .setName("New Device Name")
+      .setName("New device name")
       .setDesc("Generate an authenticated token for your phone, tablet, or another computer")
       .addText((text) =>
         text
@@ -127,7 +127,7 @@ export class DistributedSyncSettingTab extends PluginSettingTab {
       )
       .addButton((btn) =>
         btn
-          .setButtonText("Generate Token")
+          .setButtonText("Generate token")
           .setCta()
           .onClick(async () => {
             if (!this.plugin.settings.token) {
