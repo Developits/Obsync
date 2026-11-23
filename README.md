@@ -9,7 +9,7 @@
 
 Distributed Sync is an Obsidian plugin plus a Cloudflare Worker backend that keeps your vault synchronized across devices without handing your notes to a third-party sync service. Metadata lives in Cloudflare D1, file bytes live in R2 as SHA-256-addressed blobs, and every client talks to your Worker over HTTPS.
 
-> **Status:** v1.2.0. Self-hosted and actively hardened; community-directory review is in progress. Start with a disposable test vault and a staging Worker before trusting a primary vault.
+> **Status:** v1.2.1. Self-hosted and actively hardened; listed in the [community directory](https://community.obsidian.md/plugins/distributed-sync). Start with a disposable test vault and a staging Worker before trusting a primary vault.
 >
 > **Upgrading from v1.0.x?** The plugin ID changed from `obsidian-distributed-sync` to `distributed-sync` so it can be published in the community directory. Install v1.1.0 into the new folder and re-enter your server URL and device token. Vault content is unaffected; the old plugin folder can be removed after the new version connects.
 
@@ -74,8 +74,7 @@ Requirements: Node.js 24+, a Cloudflare account, and Wrangler (installed as a pr
 ```bash
 git clone https://github.com/Developits/Obsync.git
 cd Obsync
-npm ci --prefix server --ignore-scripts
-npm ci --prefix plugin --ignore-scripts
+npm ci --ignore-scripts
 
 cd server
 npx wrangler login
@@ -179,20 +178,21 @@ The full engineering boundaries and validation history are in [KNOWN-LIMITATIONS
 ## Development
 
 ```bash
-npm ci --prefix server --ignore-scripts
-npm ci --prefix plugin --ignore-scripts
+npm ci --ignore-scripts
 
-npm run check     # typecheck both subprojects
+npm run check     # validate metadata, lint, and typecheck both subprojects
 npm run build     # build the plugin bundle
 npm test          # regression suites (Node test runner)
 npm run package   # build deterministic release ZIPs into dist/
 ```
 
-CI runs typecheck, build, the regression suites, dependency audits, packaging, and a release workflow on version tags. The suites cover concurrent mutations, offline edits, rename collisions, conflict preservation, index recovery, retention, authentication, protocol validation, and plugin lifecycle behavior. Mocked adapters do not prove native Obsidian or device correctness; those remain separate release gates.
+CI runs lint, typecheck, build, the regression suites, dependency audits, packaging, and a release workflow on version tags. The suites cover concurrent mutations, offline edits, rename collisions, conflict preservation, index recovery, retention, authentication, protocol validation, and plugin lifecycle behavior. Mocked adapters do not prove native Obsidian or device correctness; those remain separate release gates.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development, testing, privacy, and release guidelines.
 
 ## Roadmap
 
-- Publish the plugin to the Obsidian community gallery.
+- Continue improving community-directory review findings and documentation.
 - Device management: revocation, roles, and read-only tokens.
 - Optional client-side end-to-end encryption.
 - Orphaned-blob garbage collection and automated retention.

@@ -5,6 +5,7 @@ import { ApiError, ConflictError, SyncClient, type ChangeEntry } from "./api.ts"
 import { merge3 } from "./diff3.ts";
 import { LocalIndex, type FileState } from "./index-store.ts";
 import { generateConflictPath, isIgnored, normalizePath } from "./paths.ts";
+import { errorMessage } from "./validation.ts";
 
 export interface VaultAdapter {
   read(path: string): Promise<string>;
@@ -31,6 +32,8 @@ export interface SyncEngineOptions {
   client: SyncClient;
   deviceName: string;
   excludes?: string[];
+  /** Host scheduler; headless callers may omit UI event-loop yielding. */
+  yieldToEventLoop?: () => Promise<void>;
   onConflict?: (originalPath: string, conflictPath: string) => void;
   onLog?: (message: string) => void;
   onProgress?: (current: number, total: number, path: string) => void;
@@ -65,6 +68,7 @@ export class SyncEngine {
   private client: SyncClient;
   private deviceName: string;
   private excludes: string[];
+  private yieldToEventLoop: () => Promise<void>;
   private onConflict?: (originalPath: string, conflictPath: string) => void;
   private onLog?: (message: string) => void;
   private onProgress?: (current: number, total: number, path: string) => void;
@@ -76,6 +80,7 @@ export class SyncEngine {
     this.client = opts.client;
     this.deviceName = opts.deviceName;
     this.excludes = opts.excludes || [];
+    this.yieldToEventLoop = opts.yieldToEventLoop ?? (() => Promise.resolve());
     this.onConflict = opts.onConflict;
     this.onLog = opts.onLog;
     this.onProgress = opts.onProgress;
@@ -272,7 +277,7 @@ export class SyncEngine {
           this.index.clearQueuedRename(rename.from);
           conflictCount++;
         } else {
-          this.log(`Failed to push rename: ${err}`);
+          this.log(`Failed to push rename: ${errorMessage(err)}`);
         }
       }
     }
@@ -292,7 +297,7 @@ export class SyncEngine {
 
       // Yield event loop briefly every 10 files to keep UI responsive on large vaults
       if (dirtyProgressIndex % 10 === 0) {
-        await new Promise((r) => setTimeout(r, 0));
+        await this.yieldToEventLoop();
       }
 
       try {
@@ -316,7 +321,7 @@ export class SyncEngine {
               await this.reconcileRemoteEdit(path, err.serverRev);
             } else {
               errors.push({ path, operation: "push", message: messageOf(err) });
-              this.log(`Failed to push deletion of ${path}: ${err}`);
+              this.log(`Failed to push deletion of ${path}: ${errorMessage(err)}`);
             }
           }
         } else {
@@ -355,7 +360,7 @@ export class SyncEngine {
               }
             } else {
               errors.push({ path, operation: "push", message: messageOf(err) });
-              this.log(`Failed to push edit for ${path}: ${err}`);
+              this.log(`Failed to push edit for ${path}: ${errorMessage(err)}`);
             }
           }
         }
@@ -372,7 +377,7 @@ export class SyncEngine {
     } catch (err) {
       // Persistence failure is a real failure, never a silent success.
       errors.push({ path: "", operation: "save", message: messageOf(err) });
-      this.log(`Failed to persist sync index: ${err}`);
+      this.log(`Failed to persist sync index: ${errorMessage(err)}`);
     }
 
     let pending = 0;
@@ -630,7 +635,7 @@ export class SyncEngine {
           return { conflict: false };
         }
       } catch (e) {
-        this.log(`diff3 failed for ${path}, falling back to conflict file: ${e}`);
+        this.log(`diff3 failed for ${path}, falling back to conflict file: ${errorMessage(e)}`);
       }
     }
 
@@ -721,7 +726,7 @@ export class SyncEngine {
         this.log(`Edit beats deletion: revived ${path} on server`);
         return false;
       } catch (e) {
-        this.log(`Failed to revive deleted file ${path}: ${e}`);
+        this.log(`Failed to revive deleted file ${path}: ${errorMessage(e)}`);
       }
     }
 

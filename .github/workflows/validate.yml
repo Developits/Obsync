@@ -19,7 +19,7 @@ jobs:
       - name: Install locked development dependencies
         run: |
           npm ci --ignore-scripts
-      - name: Typecheck, build, and run all regressions
+      - name: Lint, typecheck, build, and run all regressions
         run: |
           npm run check
           npm run build

@@ -6,11 +6,12 @@ import { LocalDiagnostics, safeError } from "./diagnostics";
 import { SyncClient } from "./api";
 import { LocalIndex, type StorageAdapter } from "./index-store";
 import { isIgnored, normalizePath } from "./paths";
-import { DEFAULT_SETTINGS, DistributedSyncSettingTab, type DistributedSyncSettings } from "./settings";
+import { parseSettings, DistributedSyncSettingTab, type DistributedSyncSettings } from "./settings";
 import { SyncEngine, type VaultAdapter } from "./sync-engine";
+import { errorMessage } from "./validation";
 
 export default class DistributedSyncPlugin extends Plugin {
-  settings: DistributedSyncSettings = DEFAULT_SETTINGS;
+  settings: DistributedSyncSettings = parseSettings(null);
   private index!: LocalIndex;
   private client!: SyncClient;
   private engine!: SyncEngine;
@@ -94,7 +95,7 @@ export default class DistributedSyncPlugin extends Plugin {
           new Notice(`Sync online: ${stats.files} files on server (seq: ${stats.seq})`);
         } catch (e) {
           await this.recordDiagnosticFailure("status_failure", e);
-          new Notice(`Sync server error: ${e}`);
+          new Notice(`Sync server error: ${errorMessage(e)}`);
         }
       },
     });
@@ -156,6 +157,7 @@ export default class DistributedSyncPlugin extends Plugin {
       client: this.client,
       deviceName: this.settings.deviceName,
       excludes: this.syncExcludes,
+      yieldToEventLoop:() => new Promise<void>(resolve => { window.setTimeout(resolve, 0); }),
       onConflict: (orig, conflict) => {
         new Notice(`Sync conflict on ${orig}. Saved remote version to ${conflict}`, 8000);
         this.updateStatus("conflict");
@@ -171,7 +173,8 @@ export default class DistributedSyncPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const saved: unknown = await this.loadData();
+    this.settings = parseSettings(saved);
   }
 
   async saveSettings(): Promise<void> {
@@ -215,7 +218,7 @@ export default class DistributedSyncPlugin extends Plugin {
     }
   }
 
-  onunload(): Promise<void> {
+  onunload(): void {
     this.unloading = true;
     this.clearAutoSync();
     if (this.debounceTimer !== null) {
@@ -223,7 +226,9 @@ export default class DistributedSyncPlugin extends Plugin {
       this.debounceTimer = null;
     }
     // Obsidian may not await unload: abrupt process termination can lose this flush.
-    return this.diagnostics?.close() ?? Promise.resolve();
+    void this.diagnostics?.close().catch(() => {
+      new Notice("Local diagnostics could not finish closing. Sync data is unaffected.");
+    });
   }
 
   private configureDiagnostics(): Promise<void> {
@@ -316,7 +321,7 @@ export default class DistributedSyncPlugin extends Plugin {
     } catch (e) {
       this.diagnostics?.log("sync_exception", safeError(e));
       this.updateStatus("error");
-      if (manual) new Notice(`Sync failed: ${e}`);
+      if (manual) new Notice(`Sync failed: ${errorMessage(e)}`);
     } finally {
       this.isSyncing = false;
       await this.diagnostics?.flush();

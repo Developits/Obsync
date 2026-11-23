@@ -45,7 +45,7 @@ function commonLines(a: string[], b: string[]): Match[] {
   let x = n;
   let y = m;
   for (let step = Math.min(d, trace.length - 1); step > 0; step--) {
-    const prev = trace[step] as Int32Array;
+    const prev = trace[step];
     const k = x - y;
     const idx = k + max;
     let prevK: number;
@@ -100,7 +100,7 @@ function blockPrefix(...chunks: string[][]): string {
   for (const chunk of chunks) {
     for (const line of chunk) {
       const m = /^((?:\s*>\s?)+)/.exec(line);
-      if (m) return m[1] as string;
+      if (m) return m[1];
     }
   }
   return "";
@@ -175,7 +175,7 @@ export function merge3(
       theirsLabel,
       () => conflicts++
     );
-    out.push(b[bi] as string);
+    out.push(b[bi]);
     ai = ma + 1;
     ci = mc + 1;
     regionStart = bi + 1;

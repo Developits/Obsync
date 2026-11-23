@@ -1,4 +1,5 @@
 // Local-only diagnostics. Never pass free-form messages or note identifiers to disk.
+import { isRecord, isUnknownArray, isNonNegativeInteger } from "./validation.ts";
 const EVENTS = new Set(["session_start", "session_stop", "previous_session_unclean", "marker_invalid", "sync_start", "sync_result", "sync_failure", "sync_exception", "startup_failure", "status_failure", "token_failure", "api_failure", "global_error", "unhandled_rejection", "queue_overflow"]);
 const OPERATIONS = new Set(["scan", "pull", "push", "save"]);
 const CATEGORIES = new Set(["error", "type", "range", "syntax", "reference", "api", "conflict", "unknown"]);
@@ -6,7 +7,7 @@ const CODES = new Set(["ENOSPC", "EACCES", "EPERM", "ENOENT", "EIO", "ETIMEDOUT"
 const COUNT_FIELDS = ["pulled", "pushed", "conflicts", "failed", "pending", "dropped"];
 const encoder = new TextEncoder();
 const bytes = (text: string): number => encoder.encode(text).length;
-const count = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= 1e9;
+const count = (value: unknown): value is number => isNonNegativeInteger(value) && value <= 1e9;
 const version = (value: unknown): string => typeof value === "string" && /^\d{1,4}\.\d{1,4}(?:\.\d{1,4})?$/.test(value) ? value : "unknown";
 type Row = Record<string, unknown>;
 export interface DiagnosticAdapter {
@@ -68,8 +69,10 @@ function fields(input: Row): Row {
   if (typeof input.category === "string" && CATEGORIES.has(input.category)) out.category = input.category;
   if (typeof input.code === "string" && CODES.has(input.code)) out.code = input.code;
   if (Number.isInteger(input.status) && Number(input.status) >= 400 && Number(input.status) <= 599) out.status = input.status;
-  if (Array.isArray(input.frames)) {
-    out.frames = input.frames.slice(0, 5).filter(f => f && count(f.line) && count(f.column)).map(f => ({line:f.line, column:f.column}));
+  if (isUnknownArray(input.frames)) {
+    out.frames = input.frames.slice(0, 5).flatMap(frame =>
+      isRecord(frame) && count(frame.line) && count(frame.column)
+        ? [{line:frame.line, column:frame.column}] : []);
   }
   return out;
 }
@@ -183,8 +186,8 @@ export class LocalDiagnostics {
     const marker = await this.readBounded("session.json", 256);
     if (marker !== null) {
       try {
-        const state = JSON.parse(marker);
-        if (state?.schema !== 1 || !["open", "closed"].includes(state.state)) throw new Error();
+        const state: unknown = JSON.parse(marker);
+        if (!isRecord(state) || state.schema !== 1 || (state.state !== "open" && state.state !== "closed")) throw new Error();
         if (state.state === "open") this.log("previous_session_unclean");
       } catch { this.log("marker_invalid"); }
     }
@@ -259,11 +262,11 @@ export class LocalDiagnostics {
     const capture = (event: Event): void => {
       try {
         const e = event as ErrorEvent & PromiseRejectionEvent;
-        const error = event.type === "unhandledrejection" ? e.reason : e.error;
+        const error: unknown = event.type === "unhandledrejection" ? e.reason : e.error;
         const safe = safeError(error);
         const filename = typeof e.filename === "string" ? e.filename : "";
         const ownFile = ownSource(filename);
-        const ownThrow = stackLocations(error?.stack)[0]?.own === true;
+        const ownThrow = stackLocations(isRecord(error) ? error.stack : undefined)[0]?.own === true;
         if (filename ? !ownFile : !ownThrow) return;
         if (!safe.frames && ownFile && count(e.lineno) && count(e.colno)) safe.frames = [{line:e.lineno,column:e.colno}];
         this.log(event.type === "unhandledrejection" ? "unhandled_rejection" : "global_error", safe);

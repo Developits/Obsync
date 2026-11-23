@@ -12,7 +12,6 @@ export function encodePath(path: string): string {
 export function isIgnored(path: string, customExcludes: string[] = []): boolean {
   const norm = normalizePath(path);
   const defaultExcludes = [
-    ".obsidian",
     ".trash",
     ".git",
     ".index",

@@ -32,5 +32,5 @@ export async function getBlob(
   range?: R2Range
 ): Promise<R2ObjectBody | null> {
   const key = blobKey(hash);
-  return (await bucket.get(key, range ? { range } : undefined)) as R2ObjectBody | null;
+  return await bucket.get(key, range ? { range } : undefined);
 }

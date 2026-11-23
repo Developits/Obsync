@@ -30,6 +30,22 @@ __export(main_exports, {
 module.exports = __toCommonJS(main_exports);
 var import_obsidian2 = require("obsidian");
 
+// src/validation.ts
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function isUnknownArray(value) {
+  return Array.isArray(value);
+}
+function isNonNegativeInteger(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+function errorMessage(value) {
+  if (typeof value === "string") return value;
+  if (isRecord(value) && typeof value.message === "string") return value.message;
+  return "Unknown error";
+}
+
 // src/diagnostics.ts
 var EVENTS = /* @__PURE__ */ new Set(["session_start", "session_stop", "previous_session_unclean", "marker_invalid", "sync_start", "sync_result", "sync_failure", "sync_exception", "startup_failure", "status_failure", "token_failure", "api_failure", "global_error", "unhandled_rejection", "queue_overflow"]);
 var OPERATIONS = /* @__PURE__ */ new Set(["scan", "pull", "push", "save"]);
@@ -38,7 +54,7 @@ var CODES = /* @__PURE__ */ new Set(["ENOSPC", "EACCES", "EPERM", "ENOENT", "EIO
 var COUNT_FIELDS = ["pulled", "pushed", "conflicts", "failed", "pending", "dropped"];
 var encoder = new TextEncoder();
 var bytes = (text) => encoder.encode(text).length;
-var count = (value) => Number.isSafeInteger(value) && value >= 0 && value <= 1e9;
+var count = (value) => isNonNegativeInteger(value) && value <= 1e9;
 var version = (value) => typeof value === "string" && /^\d{1,4}\.\d{1,4}(?:\.\d{1,4})?$/.test(value) ? value : "unknown";
 function stackLocations(stack) {
   if (typeof stack !== "string") return [];
@@ -82,8 +98,8 @@ function fields(input) {
   if (typeof input.category === "string" && CATEGORIES.has(input.category)) out.category = input.category;
   if (typeof input.code === "string" && CODES.has(input.code)) out.code = input.code;
   if (Number.isInteger(input.status) && Number(input.status) >= 400 && Number(input.status) <= 599) out.status = input.status;
-  if (Array.isArray(input.frames)) {
-    out.frames = input.frames.slice(0, 5).filter((f) => f && count(f.line) && count(f.column)).map((f) => ({ line: f.line, column: f.column }));
+  if (isUnknownArray(input.frames)) {
+    out.frames = input.frames.slice(0, 5).flatMap((frame) => isRecord(frame) && count(frame.line) && count(frame.column) ? [{ line: frame.line, column: frame.column }] : []);
   }
   return out;
 }
@@ -216,7 +232,7 @@ var LocalDiagnostics = class {
     if (marker !== null) {
       try {
         const state = JSON.parse(marker);
-        if (state?.schema !== 1 || !["open", "closed"].includes(state.state)) throw new Error();
+        if (!isRecord(state) || state.schema !== 1 || state.state !== "open" && state.state !== "closed") throw new Error();
         if (state.state === "open") this.log("previous_session_unclean");
       } catch {
         this.log("marker_invalid");
@@ -316,7 +332,7 @@ var LocalDiagnostics = class {
         const safe = safeError(error);
         const filename = typeof e.filename === "string" ? e.filename : "";
         const ownFile = ownSource(filename);
-        const ownThrow = stackLocations(error?.stack)[0]?.own === true;
+        const ownThrow = stackLocations(isRecord(error) ? error.stack : void 0)[0]?.own === true;
         if (filename ? !ownFile : !ownThrow) return;
         if (!safe.frames && ownFile && count(e.lineno) && count(e.colno)) safe.frames = [{ line: e.lineno, column: e.colno }];
         this.log(event.type === "unhandledrejection" ? "unhandled_rejection" : "global_error", safe);
@@ -361,7 +377,6 @@ function encodePath(path) {
 function isIgnored(path, customExcludes = []) {
   const norm = normalizePath(path);
   const defaultExcludes = [
-    ".obsidian",
     ".trash",
     ".git",
     ".index",
@@ -480,11 +495,11 @@ var SyncClient = class {
       } catch {
       }
       throw new ConflictError(
-        String(j.path ?? ""),
-        Number(j.server_rev ?? 0),
-        String(j.server_hash ?? ""),
-        Boolean(j.deleted),
-        String(j.updated_by ?? "")
+        typeof j.path === "string" ? j.path : "",
+        typeof j.server_rev === "number" && Number.isSafeInteger(j.server_rev) && j.server_rev >= 0 ? j.server_rev : 0,
+        typeof j.server_hash === "string" ? j.server_hash : "",
+        j.deleted === true,
+        typeof j.updated_by === "string" ? j.updated_by : ""
       );
     }
     if (resp.status >= 400) {
@@ -496,8 +511,8 @@ var SyncClient = class {
       }
       throw new ApiError(
         resp.status,
-        String(j.error ?? "http_error"),
-        String(j.message ?? `HTTP ${resp.status}`)
+        typeof j.error === "string" ? j.error : "http_error",
+        typeof j.message === "string" ? j.message : `HTTP ${resp.status}`
       );
     }
     return resp;
@@ -577,7 +592,7 @@ var SyncClient = class {
 var LocalIndex = class {
   data = {
     last_seq: 0,
-    files: /* @__PURE__ */ Object.create(null),
+    files: {},
     pending_renames: []
   };
   dirty = false;
@@ -592,18 +607,32 @@ var LocalIndex = class {
   }
   parse(raw) {
     const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !Number.isSafeInteger(parsed.last_seq) || parsed.last_seq < 0 || !parsed.files || typeof parsed.files !== "object" || Array.isArray(parsed.files) || parsed.recovery_pending !== void 0 && typeof parsed.recovery_pending !== "boolean" || parsed.pending_renames !== void 0 && !Array.isArray(parsed.pending_renames) || parsed.generation !== void 0 && (!Number.isSafeInteger(parsed.generation) || parsed.generation < 0)) {
+    if (!isRecord(parsed) || !isNonNegativeInteger(parsed.last_seq) || !isRecord(parsed.files) || parsed.recovery_pending !== void 0 && typeof parsed.recovery_pending !== "boolean" || parsed.pending_renames !== void 0 && !isUnknownArray(parsed.pending_renames) || parsed.generation !== void 0 && !isNonNegativeInteger(parsed.generation)) {
       throw new Error("Invalid sync index schema");
     }
-    for (const state of Object.values(parsed.files)) {
-      if (!state || typeof state !== "object" || !Number.isSafeInteger(state.base_rev) || state.base_rev < 0 || typeof state.base_hash !== "string" || typeof state.local_hash !== "string" || state.base_path !== void 0 && typeof state.base_path !== "string" || [state.folder, state.dirty, state.preserve_on_delete, state.recovery_preserved].some((value) => value !== void 0 && typeof value !== "boolean") || !Number.isFinite(state.mtime)) throw new Error("Invalid sync index entry");
+    const files = {};
+    for (const [path, state] of Object.entries(parsed.files)) {
+      if (!isRecord(state) || !isNonNegativeInteger(state.base_rev) || typeof state.base_hash !== "string" || typeof state.local_hash !== "string" || state.base_path !== void 0 && typeof state.base_path !== "string" || [state.folder, state.dirty, state.preserve_on_delete, state.recovery_preserved].some((value) => value !== void 0 && typeof value !== "boolean") || typeof state.mtime !== "number" || !Number.isFinite(state.mtime)) throw new Error("Invalid sync index entry");
+      Object.defineProperty(files, path, { enumerable: true, configurable: true, writable: true, value: {
+        base_rev: state.base_rev,
+        base_hash: state.base_hash,
+        local_hash: state.local_hash,
+        mtime: state.mtime,
+        ...typeof state.base_path === "string" ? { base_path: state.base_path } : {},
+        ...typeof state.folder === "boolean" ? { folder: state.folder } : {},
+        ...typeof state.dirty === "boolean" ? { dirty: state.dirty } : {},
+        ...typeof state.preserve_on_delete === "boolean" ? { preserve_on_delete: state.preserve_on_delete } : {},
+        ...typeof state.recovery_preserved === "boolean" ? { recovery_preserved: state.recovery_preserved } : {}
+      } });
     }
+    const pendingRenames = [];
     for (const rename of parsed.pending_renames ?? []) {
-      if (!rename || typeof rename.from !== "string" || typeof rename.to !== "string" || !Number.isSafeInteger(rename.base_rev) || rename.base_rev < 1) {
+      if (!isRecord(rename) || typeof rename.from !== "string" || typeof rename.to !== "string" || !isNonNegativeInteger(rename.base_rev) || rename.base_rev < 1) {
         throw new Error("Invalid sync index rename queue");
       }
+      pendingRenames.push({ from: rename.from, to: rename.to, base_rev: rename.base_rev });
     }
-    return { generation: parsed.generation ?? 0, last_seq: parsed.last_seq, files: Object.assign(/* @__PURE__ */ Object.create(null), parsed.files), pending_renames: parsed.pending_renames ?? [], recovery_pending: parsed.recovery_pending === true };
+    return { generation: parsed.generation ?? 0, last_seq: parsed.last_seq, files, pending_renames: pendingRenames, recovery_pending: parsed.recovery_pending === true };
   }
   async load() {
     let failure;
@@ -628,8 +657,8 @@ var LocalIndex = class {
       this.dirty = newest.backup;
       return;
     }
-    if (failure) throw new Error(`Cannot recover sync index: ${String(failure)}`);
-    this.data = { last_seq: 0, files: /* @__PURE__ */ Object.create(null), pending_renames: [] };
+    if (failure) throw new Error(`Cannot recover sync index: ${errorMessage(failure)}`);
+    this.data = { last_seq: 0, files: {}, pending_renames: [] };
     this.generation = 0;
     this.dirty = false;
   }
@@ -670,17 +699,17 @@ var LocalIndex = class {
     }
   }
   get(path) {
-    return this.data.files[path];
+    return Object.hasOwn(this.data.files, path) ? this.data.files[path] : void 0;
   }
   set(path, state) {
-    if (this.needsRecovery() && this.data.files[path]?.recovery_preserved) {
+    if (this.needsRecovery() && this.get(path)?.recovery_preserved) {
       state = { ...state, recovery_preserved: true };
     }
-    this.data.files[path] = state;
+    Object.defineProperty(this.data.files, path, { value: state, enumerable: true, writable: true, configurable: true });
     this.changed();
   }
   remove(path) {
-    if (path in this.data.files) {
+    if (Object.hasOwn(this.data.files, path)) {
       delete this.data.files[path];
       this.changed();
     }
@@ -713,9 +742,22 @@ var DEFAULT_SETTINGS = {
   deviceName: "Desktop",
   autoSync: true,
   syncIntervalSeconds: 30,
-  excludes: [".obsidian", ".trash", ".git"],
+  excludes: [".trash", ".git"],
   localDiagnostics: true
 };
+function parseSettings(value) {
+  const defaults = { ...DEFAULT_SETTINGS, excludes: [...DEFAULT_SETTINGS.excludes] };
+  if (!isRecord(value)) return defaults;
+  return {
+    serverUrl: typeof value.serverUrl === "string" ? value.serverUrl : defaults.serverUrl,
+    token: typeof value.token === "string" ? value.token : defaults.token,
+    deviceName: typeof value.deviceName === "string" ? value.deviceName : defaults.deviceName,
+    autoSync: typeof value.autoSync === "boolean" ? value.autoSync : defaults.autoSync,
+    syncIntervalSeconds: typeof value.syncIntervalSeconds === "number" && Number.isSafeInteger(value.syncIntervalSeconds) && value.syncIntervalSeconds >= 5 && value.syncIntervalSeconds <= 2147483 ? value.syncIntervalSeconds : defaults.syncIntervalSeconds,
+    excludes: isUnknownArray(value.excludes) && value.excludes.every((entry) => typeof entry === "string") ? [...value.excludes] : defaults.excludes,
+    localDiagnostics: typeof value.localDiagnostics === "boolean" ? value.localDiagnostics : defaults.localDiagnostics
+  };
+}
 var DistributedSyncSettingTab = class extends import_obsidian.PluginSettingTab {
   plugin;
   constructor(app, plugin) {
@@ -723,71 +765,123 @@ var DistributedSyncSettingTab = class extends import_obsidian.PluginSettingTab {
     this.plugin = plugin;
   }
   display() {
-    const { containerEl } = this;
-    containerEl.empty();
-    new import_obsidian.Setting(containerEl).setName("Server URL").setDesc("The URL of your Cloudflare Worker sync server (e.g., https://sync.example.workers.dev)").addText(
-      (text) => text.setPlaceholder("http://localhost:8787").setValue(this.plugin.settings.serverUrl).onChange(async (val) => {
-        this.plugin.settings.serverUrl = val.trim().replace(/\s+/g, "");
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian.Setting(containerEl).setName("Device token").setDesc("Bearer authentication token for this device").addText(
-      (text) => text.setPlaceholder("obs_...").setValue(this.plugin.settings.token).onChange(async (val) => {
-        this.plugin.settings.token = val.trim();
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian.Setting(containerEl).setName("Device name").setDesc("Name used to identify this device in conflict copies and logs").addText(
-      (text) => text.setPlaceholder("Laptop").setValue(this.plugin.settings.deviceName).onChange(async (val) => {
-        this.plugin.settings.deviceName = val.trim();
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian.Setting(containerEl).setName("Auto sync").setDesc("Automatically sync changes in the background when editing notes").addToggle(
-      (toggle) => toggle.setValue(this.plugin.settings.autoSync).onChange(async (val) => {
-        this.plugin.settings.autoSync = val;
-        await this.plugin.saveSettings();
-      })
-    );
-    new import_obsidian.Setting(containerEl).setName("Sync interval (seconds)").setDesc("How often to check for remote updates in the background").addText(
-      (text) => text.setPlaceholder("30").setValue(String(this.plugin.settings.syncIntervalSeconds)).onChange(async (val) => {
-        const num = parseInt(val, 10);
-        if (!isNaN(num) && num >= 5) {
-          this.plugin.settings.syncIntervalSeconds = num;
-          await this.plugin.saveSettings();
-        }
-      })
-    );
-    new import_obsidian.Setting(containerEl).setName("Diagnostics").setHeading();
-    new import_obsidian.Setting(containerEl).setName("Local diagnostics").setDesc("Bounded local-only troubleshooting logs; no note content, paths, credentials, or uploads. Disabling retains existing logs.").addToggle((toggle) => toggle.setValue(this.plugin.settings.localDiagnostics).onChange(async (value) => {
-      this.plugin.settings.localDiagnostics = value;
-      await this.plugin.saveSettings();
-    })).addButton((button) => button.setButtonText("Export diagnostics").onClick(() => this.plugin.exportDiagnostics()));
-    new import_obsidian.Setting(containerEl).setName("Add another device").setHeading();
+    this.containerEl.empty();
+    for (const definition of this.getSettingDefinitions()) {
+      const setting = new import_obsidian.Setting(this.containerEl).setName(definition.name);
+      if (definition.desc) setting.setDesc(definition.desc);
+      definition.render(setting);
+    }
+  }
+  getSettingDefinitions() {
     let newDeviceName = "Tablet";
-    new import_obsidian.Setting(containerEl).setName("New device name").setDesc("Generate an authenticated token for your phone, tablet, or another computer").addText(
-      (text) => text.setPlaceholder("Tablet").setValue(newDeviceName).onChange((val) => {
-        newDeviceName = val.trim();
-      })
-    ).addButton(
-      (btn) => btn.setButtonText("Generate token").setCta().onClick(async () => {
-        if (!this.plugin.settings.token) {
-          new import_obsidian.Notice("Cannot mint token: this device is not connected yet.");
-          return;
+    return [
+      {
+        name: "Server URL",
+        desc: "The URL of your Cloudflare Worker sync server (e.g., https://sync.example.workers.dev)",
+        render: (setting) => {
+          setting.addText(
+            (text) => text.setPlaceholder("http://localhost:8787").setValue(this.plugin.settings.serverUrl).onChange(async (val) => {
+              this.plugin.settings.serverUrl = val.trim().replace(/\s+/g, "");
+              await this.plugin.saveSettings();
+            })
+          );
         }
-        try {
-          btn.setDisabled(true);
-          const res = await this.plugin.getClient().issueToken(newDeviceName || "NewDevice");
-          await navigator.clipboard.writeText(res.token);
-          new import_obsidian.Notice(`Token for "${newDeviceName}" generated and copied to clipboard! Paste it on your other device.`, 12e3);
-        } catch (e) {
-          await this.plugin.recordDiagnosticFailure("token_failure", e);
-          new import_obsidian.Notice(`Failed to generate token: ${e}`);
-        } finally {
-          btn.setDisabled(false);
+      },
+      {
+        name: "Device token",
+        desc: "Bearer authentication token for this device",
+        render: (setting) => {
+          setting.addText(
+            (text) => text.setPlaceholder("obs_...").setValue(this.plugin.settings.token).onChange(async (val) => {
+              this.plugin.settings.token = val.trim();
+              await this.plugin.saveSettings();
+            })
+          );
         }
-      })
-    );
+      },
+      {
+        name: "Device name",
+        desc: "Name used to identify this device in conflict copies and logs",
+        render: (setting) => {
+          setting.addText(
+            (text) => text.setPlaceholder("Laptop").setValue(this.plugin.settings.deviceName).onChange(async (val) => {
+              this.plugin.settings.deviceName = val.trim();
+              await this.plugin.saveSettings();
+            })
+          );
+        }
+      },
+      {
+        name: "Auto sync",
+        desc: "Automatically sync changes in the background when editing notes",
+        render: (setting) => {
+          setting.addToggle(
+            (toggle) => toggle.setValue(this.plugin.settings.autoSync).onChange(async (val) => {
+              this.plugin.settings.autoSync = val;
+              await this.plugin.saveSettings();
+            })
+          );
+        }
+      },
+      {
+        name: "Sync interval (seconds)",
+        desc: "How often to check for remote updates in the background",
+        render: (setting) => {
+          setting.addText(
+            (text) => text.setPlaceholder("30").setValue(String(this.plugin.settings.syncIntervalSeconds)).onChange(async (val) => {
+              const num = Number(val);
+              if (Number.isSafeInteger(num) && num >= 5 && num <= 2147483) {
+                this.plugin.settings.syncIntervalSeconds = num;
+                await this.plugin.saveSettings();
+              }
+            })
+          );
+        }
+      },
+      {
+        name: "Local diagnostics",
+        desc: "Bounded local-only troubleshooting logs; no note content, paths, credentials, or uploads. Disabling retains existing logs.",
+        render: (setting) => {
+          setting.addToggle(
+            (toggle) => toggle.setValue(this.plugin.settings.localDiagnostics).onChange(async (value) => {
+              this.plugin.settings.localDiagnostics = value;
+              await this.plugin.saveSettings();
+            })
+          ).addButton(
+            (button) => button.setButtonText("Export diagnostics").onClick(() => this.plugin.exportDiagnostics())
+          );
+        }
+      },
+      {
+        name: "New device name",
+        desc: "Generate an authenticated token for your phone, tablet, or another computer",
+        render: (setting) => {
+          setting.addText(
+            (text) => text.setPlaceholder("Tablet").setValue(newDeviceName).onChange((val) => {
+              newDeviceName = val.trim();
+            })
+          ).addButton(
+            (btn) => btn.setButtonText("Generate token").setCta().onClick(async () => {
+              if (!this.plugin.settings.token) {
+                new import_obsidian.Notice("Cannot mint token: this device is not connected yet.");
+                return;
+              }
+              try {
+                btn.setDisabled(true);
+                const res = await this.plugin.getClient().issueToken(newDeviceName || "NewDevice");
+                await navigator.clipboard.writeText(res.token);
+                new import_obsidian.Notice(`Token for "${newDeviceName}" generated and copied to clipboard! Paste it on your other device.`, 12e3);
+              } catch (e) {
+                await this.plugin.recordDiagnosticFailure("token_failure", e);
+                new import_obsidian.Notice(`Failed to generate token: ${errorMessage(e)}`);
+              } finally {
+                btn.setDisabled(false);
+              }
+            })
+          );
+        }
+      }
+    ];
   }
 };
 
@@ -955,6 +1049,7 @@ var SyncEngine = class {
   client;
   deviceName;
   excludes;
+  yieldToEventLoop;
   onConflict;
   onLog;
   onProgress;
@@ -965,6 +1060,7 @@ var SyncEngine = class {
     this.client = opts.client;
     this.deviceName = opts.deviceName;
     this.excludes = opts.excludes || [];
+    this.yieldToEventLoop = opts.yieldToEventLoop ?? (() => Promise.resolve());
     this.onConflict = opts.onConflict;
     this.onLog = opts.onLog;
     this.onProgress = opts.onProgress;
@@ -1138,7 +1234,7 @@ var SyncEngine = class {
           this.index.clearQueuedRename(rename.from);
           conflictCount++;
         } else {
-          this.log(`Failed to push rename: ${err}`);
+          this.log(`Failed to push rename: ${errorMessage(err)}`);
         }
       }
     }
@@ -1153,7 +1249,7 @@ var SyncEngine = class {
         this.onProgress(dirtyProgressIndex, totalDirty, path);
       }
       if (dirtyProgressIndex % 10 === 0) {
-        await new Promise((r) => setTimeout(r, 0));
+        await this.yieldToEventLoop();
       }
       try {
         if (this.scanFailures.has(path)) continue;
@@ -1169,7 +1265,7 @@ var SyncEngine = class {
               await this.reconcileRemoteEdit(path, err.serverRev);
             } else {
               errors.push({ path, operation: "push", message: messageOf(err) });
-              this.log(`Failed to push deletion of ${path}: ${err}`);
+              this.log(`Failed to push deletion of ${path}: ${errorMessage(err)}`);
             }
           }
         } else {
@@ -1200,7 +1296,7 @@ var SyncEngine = class {
               }
             } else {
               errors.push({ path, operation: "push", message: messageOf(err) });
-              this.log(`Failed to push edit for ${path}: ${err}`);
+              this.log(`Failed to push edit for ${path}: ${errorMessage(err)}`);
             }
           }
         }
@@ -1213,7 +1309,7 @@ var SyncEngine = class {
       await this.index.save();
     } catch (err) {
       errors.push({ path: "", operation: "save", message: messageOf(err) });
-      this.log(`Failed to persist sync index: ${err}`);
+      this.log(`Failed to persist sync index: ${errorMessage(err)}`);
     }
     let pending = 0;
     for (const [path, state] of this.index.allEntries()) {
@@ -1410,7 +1506,7 @@ var SyncEngine = class {
           return { conflict: false };
         }
       } catch (e) {
-        this.log(`diff3 failed for ${path}, falling back to conflict file: ${e}`);
+        this.log(`diff3 failed for ${path}, falling back to conflict file: ${errorMessage(e)}`);
       }
     }
     const remoteFile = await this.client.getFile(path, entry.rev);
@@ -1484,7 +1580,7 @@ var SyncEngine = class {
         this.log(`Edit beats deletion: revived ${path} on server`);
         return false;
       } catch (e) {
-        this.log(`Failed to revive deleted file ${path}: ${e}`);
+        this.log(`Failed to revive deleted file ${path}: ${errorMessage(e)}`);
       }
     }
     const serverFile = await this.client.getFile(path, conflict.serverRev);
@@ -1568,7 +1664,7 @@ var SyncEngine = class {
 
 // src/main.ts
 var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
-  settings = DEFAULT_SETTINGS;
+  settings = parseSettings(null);
   index;
   client;
   engine;
@@ -1640,7 +1736,7 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
           new import_obsidian2.Notice(`Sync online: ${stats.files} files on server (seq: ${stats.seq})`);
         } catch (e) {
           await this.recordDiagnosticFailure("status_failure", e);
-          new import_obsidian2.Notice(`Sync server error: ${e}`);
+          new import_obsidian2.Notice(`Sync server error: ${errorMessage(e)}`);
         }
       }
     });
@@ -1693,6 +1789,9 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
       client: this.client,
       deviceName: this.settings.deviceName,
       excludes: this.syncExcludes,
+      yieldToEventLoop: () => new Promise((resolve) => {
+        window.setTimeout(resolve, 0);
+      }),
       onConflict: (orig, conflict) => {
         new import_obsidian2.Notice(`Sync conflict on ${orig}. Saved remote version to ${conflict}`, 8e3);
         this.updateStatus("conflict");
@@ -1706,7 +1805,8 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
     return this.client;
   }
   async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const saved = await this.loadData();
+    this.settings = parseSettings(saved);
   }
   async saveSettings() {
     await this.saveData(this.settings);
@@ -1751,7 +1851,9 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
       window.clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
-    return this.diagnostics?.close() ?? Promise.resolve();
+    void this.diagnostics?.close().catch(() => {
+      new import_obsidian2.Notice("Local diagnostics could not finish closing. Sync data is unaffected.");
+    });
   }
   configureDiagnostics() {
     const update = () => this.updateDiagnostics();
@@ -1842,7 +1944,7 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
     } catch (e) {
       this.diagnostics?.log("sync_exception", safeError(e));
       this.updateStatus("error");
-      if (manual) new import_obsidian2.Notice(`Sync failed: ${e}`);
+      if (manual) new import_obsidian2.Notice(`Sync failed: ${errorMessage(e)}`);
     } finally {
       this.isSyncing = false;
       await this.diagnostics?.flush();

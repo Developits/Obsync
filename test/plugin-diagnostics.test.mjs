@@ -33,6 +33,45 @@ function instance(options={}){
 }
 function rows(files){return ['previous.jsonl','current.jsonl'].flatMap(n=>(files.get(`${ROOT}/${n}`)??'').split('\n').filter(Boolean).map(JSON.parse));}
 
+test('invalid saved settings use validated defaults instead of unsafe assigned values',async()=>{
+ const {p}=instance({settings:{token:42,serverUrl:{},deviceName:[],autoSync:'yes',syncIntervalSeconds:Infinity,excludes:[{}],localDiagnostics:'yes'}});
+ await p.onload();
+ assert.equal(p.settings.token,'');
+ assert.equal(p.settings.serverUrl,'http://localhost:8787');
+ assert.equal(p.settings.deviceName,'Desktop');
+ assert.equal(p.settings.autoSync,true);
+ assert.equal(p.settings.syncIntervalSeconds,30);
+ assert.equal(p.settings.excludes.join(','),'.trash,.git');
+ assert.equal(p.settings.localDiagnostics,true);
+ p.onunload();await p.diagnostics.close();
+});
+
+test('declarative searchable settings render the same actionable rows as the legacy display',async()=>{
+ const {p}=instance();await p.onload();
+ const definitions=p.tab.getSettingDefinitions();
+ assert.equal(definitions.length,7);
+ assert.ok(definitions.some(d=>d.name==='Device token'));
+ assert.ok(definitions.some(d=>d.name==='Local diagnostics'));
+ assert.ok(definitions.every(d=>typeof d.desc==='string' && typeof d.render==='function'));
+ buttons.length=0;
+ for(const d of definitions)d.render(new Setting().setName(d.name));
+ assert.equal(buttons.map(b=>b.text).join(','),'Export diagnostics,Generate token');
+ buttons.length=0;p.tab.display();
+ assert.equal(buttons.map(b=>b.text).join(','),'Export diagnostics,Generate token');
+ p.onunload();await p.diagnostics.close();
+});
+
+test('unload returns void, detaches listeners immediately, and closes diagnostics asynchronously',async()=>{
+ const {p,files,window}=instance();await p.onload();
+ assert.equal(p.onunload(),undefined);
+ const before=rows(files).filter(r=>r.event==='global_error').length;
+ const event=new Event('error');Object.assign(event,{filename:'plugin:distributed-sync',lineno:1,colno:1,error:Error('not captured after unload')});
+ window.dispatchEvent(event);
+ await p.diagnostics.close();
+ assert.equal(rows(files).filter(r=>r.event==='global_error').length,before);
+ assert.equal(JSON.parse(files.get(`${ROOT}/session.json`)).state,'closed');
+});
+
 test('custom vault configuration directory contains diagnostics and index, and is excluded from sync',async()=>{
  const {p,files}=instance({configDir:'.custom-config'});
  await p.onload();
@@ -42,6 +81,8 @@ test('custom vault configuration directory contains diagnostics and index, and i
  assert.ok(files.has('.custom-config/plugins/distributed-sync/state.json'));
  assert.ok(files.has('.custom-config/plugins/distributed-sync/diagnostics/export.json'));
  assert.ok(p.engine.excludes.includes('.custom-config'));
+ p.onFileModified({path:'.custom-config/private-settings.json'});
+ assert.equal(p.index.get('.custom-config/private-settings.json'),undefined);
  assert.ok(![...files.keys()].some(path=>path.startsWith('.obsidian/')));
  await p.onunload();
 });

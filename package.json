@@ -1,17 +1,31 @@
 {
   "name": "obsidian-distributed-sync-monorepo",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "license": "MIT",
   "type": "module",
-  "workspaces": ["plugin", "server"],
+  "workspaces": [
+    "plugin",
+    "server"
+  ],
   "description": "Distributed Obsidian Sync System with Cloudflare Worker + D1 + R2",
   "scripts": {
     "build": "cd plugin && npm run build",
     "package": "node scripts/package.mjs",
     "check:manifest": "node scripts/check-manifest.mjs",
-    "check": "node scripts/check-manifest.mjs && npm --prefix server run check && npm --prefix plugin run check",
+    "lint": "eslint plugin/src server/src manifest.json package.json LICENSE --max-warnings 0",
+    "check": "node scripts/check-manifest.mjs && npm run lint && npm --prefix server run check && npm --prefix plugin run check",
     "test": "node --experimental-strip-types --test test/*.test.mjs",
     "test:worker": "node test/workerd-smoke.mjs"
+  },
+  "devDependencies": {
+    "eslint": "9.39.5",
+    "eslint-plugin-obsidianmd": "0.6.0",
+    "typescript-eslint": "8.73.0"
+  },
+  "overrides": {
+    "@microsoft/eslint-plugin-sdl": {
+      "eslint-plugin-n": "17.24.0"
+    }
   }
 }

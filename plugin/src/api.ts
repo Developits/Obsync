@@ -156,11 +156,11 @@ export class SyncClient {
         if (value && typeof value === "object" && !Array.isArray(value)) j = value as Record<string, unknown>;
       } catch { /* Malformed error bodies use the defaults below. */ }
       throw new ConflictError(
-        String(j.path ?? ""),
-        Number(j.server_rev ?? 0),
-        String(j.server_hash ?? ""),
-        Boolean(j.deleted),
-        String(j.updated_by ?? "")
+        typeof j.path === "string" ? j.path : "",
+        typeof j.server_rev === "number" && Number.isSafeInteger(j.server_rev) && j.server_rev >= 0 ? j.server_rev : 0,
+        typeof j.server_hash === "string" ? j.server_hash : "",
+        j.deleted === true,
+        typeof j.updated_by === "string" ? j.updated_by : ""
       );
     }
 
@@ -172,8 +172,8 @@ export class SyncClient {
       } catch { /* Malformed error bodies use the defaults below. */ }
       throw new ApiError(
         resp.status,
-        String(j.error ?? "http_error"),
-        String(j.message ?? `HTTP ${resp.status}`)
+        typeof j.error === "string" ? j.error : "http_error",
+        typeof j.message === "string" ? j.message : `HTTP ${resp.status}`
       );
     }
 

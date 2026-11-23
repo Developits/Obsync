@@ -1,7 +1,7 @@
 {
   "id": "distributed-sync",
   "name": "Distributed Sync",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "minAppVersion": "1.7.2",
   "description": "Sync your vault across devices through your own Cloudflare Worker, with three-way merges and conflict files.",
   "author": "Nahid",

@@ -1,4 +1,5 @@
 // Local index state store. Tracks base revisions, known hashes, dirty states, and sequence cursor.
+import { isRecord, isUnknownArray, isNonNegativeInteger, errorMessage } from "./validation.ts";
 
 export interface FileState {
   base_rev: number;
@@ -36,7 +37,7 @@ export interface StorageAdapter {
 export class LocalIndex {
   private data: IndexData = {
     last_seq: 0,
-    files: Object.create(null),
+    files: {},
     pending_renames: [],
   };
   private dirty = false;
@@ -52,30 +53,42 @@ export class LocalIndex {
   }
 
   private parse(raw: string): IndexData {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
-        || !Number.isSafeInteger(parsed.last_seq) || parsed.last_seq < 0
-        || !parsed.files || typeof parsed.files !== "object" || Array.isArray(parsed.files)
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed)
+        || !isNonNegativeInteger(parsed.last_seq)
+        || !isRecord(parsed.files)
         || (parsed.recovery_pending !== undefined && typeof parsed.recovery_pending !== "boolean")
-        || (parsed.pending_renames !== undefined && !Array.isArray(parsed.pending_renames))
-        || (parsed.generation !== undefined && (!Number.isSafeInteger(parsed.generation) || parsed.generation < 0))) {
+        || (parsed.pending_renames !== undefined && !isUnknownArray(parsed.pending_renames))
+        || (parsed.generation !== undefined && !isNonNegativeInteger(parsed.generation))) {
       throw new Error("Invalid sync index schema");
     }
-    for (const state of Object.values(parsed.files) as FileState[]) {
-      if (!state || typeof state !== "object" || !Number.isSafeInteger(state.base_rev) || state.base_rev < 0
+    const files: Record<string, FileState> = {};
+    for (const [path, state] of Object.entries(parsed.files)) {
+      if (!isRecord(state) || !isNonNegativeInteger(state.base_rev)
           || typeof state.base_hash !== "string" || typeof state.local_hash !== "string"
           || (state.base_path !== undefined && typeof state.base_path !== "string")
           || [state.folder, state.dirty, state.preserve_on_delete, state.recovery_preserved]
             .some((value) => value !== undefined && typeof value !== "boolean")
-          || !Number.isFinite(state.mtime)) throw new Error("Invalid sync index entry");
+           || typeof state.mtime !== "number" || !Number.isFinite(state.mtime)) throw new Error("Invalid sync index entry");
+      // Construct validated entries, rather than asserting the JSON is FileState.
+      Object.defineProperty(files, path, {enumerable:true, configurable:true, writable:true, value:{
+        base_rev:state.base_rev, base_hash:state.base_hash, local_hash:state.local_hash, mtime:state.mtime,
+        ...(typeof state.base_path === "string" ? {base_path:state.base_path} : {}),
+        ...(typeof state.folder === "boolean" ? {folder:state.folder} : {}),
+        ...(typeof state.dirty === "boolean" ? {dirty:state.dirty} : {}),
+        ...(typeof state.preserve_on_delete === "boolean" ? {preserve_on_delete:state.preserve_on_delete} : {}),
+        ...(typeof state.recovery_preserved === "boolean" ? {recovery_preserved:state.recovery_preserved} : {}),
+      } satisfies FileState});
     }
+    const pendingRenames: PendingRename[] = [];
     for (const rename of parsed.pending_renames ?? []) {
-      if (!rename || typeof rename.from !== "string" || typeof rename.to !== "string"
-          || !Number.isSafeInteger(rename.base_rev) || rename.base_rev < 1) {
+      if (!isRecord(rename) || typeof rename.from !== "string" || typeof rename.to !== "string"
+          || !isNonNegativeInteger(rename.base_rev) || rename.base_rev < 1) {
         throw new Error("Invalid sync index rename queue");
       }
+      pendingRenames.push({from:rename.from, to:rename.to, base_rev:rename.base_rev});
     }
-    return { generation: parsed.generation ?? 0, last_seq: parsed.last_seq, files: Object.assign(Object.create(null), parsed.files), pending_renames: parsed.pending_renames ?? [], recovery_pending: parsed.recovery_pending === true };
+    return { generation: parsed.generation ?? 0, last_seq: parsed.last_seq, files, pending_renames: pendingRenames, recovery_pending: parsed.recovery_pending === true };
   }
 
   async load(): Promise<void> {
@@ -103,8 +116,8 @@ export class LocalIndex {
       this.dirty = newest.backup;
       return;
     }
-    if (failure) throw new Error(`Cannot recover sync index: ${String(failure)}`);
-    this.data = { last_seq: 0, files: Object.create(null), pending_renames: [] };
+    if (failure) throw new Error(`Cannot recover sync index: ${errorMessage(failure)}`);
+    this.data = { last_seq: 0, files: {}, pending_renames: [] };
     this.generation = 0;
     this.dirty = false;
   }
@@ -155,21 +168,21 @@ export class LocalIndex {
   }
 
   get(path: string): FileState | undefined {
-    return this.data.files[path];
+    return Object.hasOwn(this.data.files, path) ? this.data.files[path] : undefined;
   }
 
   set(path: string, state: FileState): void {
     // Recovery progress belongs to this recovery pass, not to a transient
     // FileState object replaced by scans, edits or reconciliation.
-    if (this.needsRecovery() && this.data.files[path]?.recovery_preserved) {
+    if (this.needsRecovery() && this.get(path)?.recovery_preserved) {
       state = { ...state, recovery_preserved: true };
     }
-    this.data.files[path] = state;
+    Object.defineProperty(this.data.files, path, {value:state, enumerable:true, writable:true, configurable:true});
     this.changed();
   }
 
   remove(path: string): void {
-    if (path in this.data.files) {
+    if (Object.hasOwn(this.data.files, path)) {
       delete this.data.files[path];
       this.changed();
     }
