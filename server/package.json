@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "description": "Cloudflare Worker backend for Distributed Obsidian Sync",
+  "license": "MIT",
   "main": "src/index.ts",
   "scripts": {
     "dev": "wrangler dev",
