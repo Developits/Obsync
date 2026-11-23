@@ -18,8 +18,7 @@ jobs:
           node-version: 24
       - name: Install locked development dependencies
         run: |
-          npm --prefix plugin ci --ignore-scripts
-          npm --prefix server ci --ignore-scripts
+          npm ci --ignore-scripts
       - name: Typecheck, build, and run all regressions
         run: |
           npm run check
@@ -27,7 +26,6 @@ jobs:
           npm test
       - name: Audit locked tooling dependencies
         run: |
-          npm --prefix plugin audit
-          npm --prefix server audit
+          npm audit
       - name: Package verified plugin
         run: npm run package

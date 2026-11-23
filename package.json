@@ -1,9 +1,10 @@
 {
   "name": "obsidian-distributed-sync-monorepo",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "license": "MIT",
   "type": "module",
+  "workspaces": ["plugin", "server"],
   "description": "Distributed Obsidian Sync System with Cloudflare Worker + D1 + R2",
   "scripts": {
     "build": "cd plugin && npm run build",

@@ -9,7 +9,7 @@
 
 Distributed Sync is an Obsidian plugin plus a Cloudflare Worker backend that keeps your vault synchronized across devices without handing your notes to a third-party sync service. Metadata lives in Cloudflare D1, file bytes live in R2 as SHA-256-addressed blobs, and every client talks to your Worker over HTTPS.
 
-> **Status:** v1.1.0. Self-hosted and actively hardened, but not yet listed in the Obsidian community plugin gallery. Start with a disposable test vault and a staging Worker before trusting a primary vault.
+> **Status:** v1.2.0. Self-hosted and actively hardened; community-directory review is in progress. Start with a disposable test vault and a staging Worker before trusting a primary vault.
 >
 > **Upgrading from v1.0.x?** The plugin ID changed from `obsidian-distributed-sync` to `distributed-sync` so it can be published in the community directory. Install v1.1.0 into the new folder and re-enter your server URL and device token. Vault content is unaffected; the old plugin folder can be removed after the new version connects.
 
@@ -115,8 +115,7 @@ The response contains a sensitive device token. Store it in the plugin settings;
 
 Download the assets from the [latest release](https://github.com/Developits/Obsync/releases/latest), then choose one option:
 
-- **Manual (versioned zip).** `distributed-sync-vX.Y.Z.zip` contains the `distributed-sync/` folder. Extract it into `YOUR_VAULT/.obsidian/plugins/`.
-- **Manual (flat zip).** `distributed-sync-flat.zip` contains `main.js` and `manifest.json` at the root. Extract it into `YOUR_VAULT/.obsidian/plugins/distributed-sync/`.
+- **Manual.** Download `main.js` and `manifest.json` into `YOUR_VAULT/.obsidian/plugins/distributed-sync/` (substitute your configured folder if it isn't `.obsidian`). Releases contain only the files the plugin installer uses; ZIPs remain available locally via `npm run package`.
 - **BRAT.** Install [BRAT](https://github.com/TfTHacker/obsidian42-brat), choose *Add Beta Plugin*, and enter `Developits/Obsync`.
 
 Enable **Distributed Sync** under *Settings → Community plugins*, then open its settings:

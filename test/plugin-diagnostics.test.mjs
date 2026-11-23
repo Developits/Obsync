@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {createRequire} from 'node:module';
-const require=createRequire(import.meta.url),{build}=require('../plugin/node_modules/esbuild');
+const require=createRequire(new URL('../plugin/package.json',import.meta.url)),{build}=require('esbuild');
 const ROOT='.obsidian/plugins/distributed-sync/diagnostics';
 const notices=[];
 class Plugin {
-  constructor(){this.commands=[];this.manifest={version:'1.0.1'};this._data={autoSync:false,token:'SECRET_TOKEN',deviceName:'SECRET_DEVICE',serverUrl:'https://SECRET_SERVER'};}
+  constructor(){this.commands=[];this.manifest={id:'distributed-sync',version:'1.0.1'};this._data={autoSync:false,token:'SECRET_TOKEN',deviceName:'SECRET_DEVICE',serverUrl:'https://SECRET_SERVER'};}
   async loadData(){return this._data;} async saveData(d){this._data=d;}
   addCommand(c){this.commands.push(c);}addSettingTab(t){this.tab=t;}addRibbonIcon(){}registerEvent(){}registerInterval(){}register(){}
   addStatusBarItem(){return {setText(t){this.text=t;},onClickEvent(){}};}
@@ -28,10 +28,23 @@ function instance(options={}){
  if(options.failLogger)adapter.write=async(p,t)=>{if(p.startsWith(ROOT))throw Error('ENOSPC SECRET_TOKEN');files.set(p,t);};
  if(options.failIndex)adapter.read=async(p)=>{if(p.endsWith('state.json')||p.endsWith('state.json.bak'))throw Error('SECRET_TOKEN index failed');return files.get(p);};
  if(options.failIndex)adapter.exists=async p=>p.endsWith('state.json')||p.endsWith('state.json.bak')||files.has(p);
- p.app={vault:{adapter,on(){},getFiles(){return [];}}};Object.assign(p._data,options.settings??{});
+  p.app={vault:{configDir:options.configDir??'.obsidian',adapter,on(){},getFiles(){return [];}}};Object.assign(p._data,options.settings??{});
  return {p,files,window};
 }
 function rows(files){return ['previous.jsonl','current.jsonl'].flatMap(n=>(files.get(`${ROOT}/${n}`)??'').split('\n').filter(Boolean).map(JSON.parse));}
+
+test('custom vault configuration directory contains diagnostics and index, and is excluded from sync',async()=>{
+ const {p,files}=instance({configDir:'.custom-config'});
+ await p.onload();
+ p.index.set('note.md',{base_rev:0,base_hash:'',local_hash:'',mtime:0,dirty:true});
+ await p.index.save();
+ await p.exportDiagnostics();
+ assert.ok(files.has('.custom-config/plugins/distributed-sync/state.json'));
+ assert.ok(files.has('.custom-config/plugins/distributed-sync/diagnostics/export.json'));
+ assert.ok(p.engine.excludes.includes('.custom-config'));
+ assert.ok(![...files.keys()].some(path=>path.startsWith('.obsidian/')));
+ await p.onunload();
+});
 
 test('bundled plugin records failed/pending results and sanitized operation failures, export command and settings UI',async()=>{
  const {p,files}=instance();await p.onload();

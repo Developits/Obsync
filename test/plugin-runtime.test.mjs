@@ -6,8 +6,8 @@ import {LocalIndex} from '../plugin/src/index-store.ts';
 import {SyncEngine} from '../plugin/src/sync-engine.ts';
 import {createTestServer,createTestDevice} from './harness.mjs';
 
-const require=createRequire(import.meta.url);
-const {build}=require('../plugin/node_modules/esbuild');
+const require=createRequire(new URL('../plugin/package.json',import.meta.url));
+const {build}=require('esbuild');
 
 class TFile{constructor(path){this.path=path}}
 const notices=[];
@@ -20,7 +20,7 @@ function stubSetInterval(fn,ms){const id=nextTimerId++;timerCalls.intervals.push
 function stubClearInterval(id){timerCalls.clearedIntervals.push(id)}
 
 class Plugin{
-  constructor(){this._intervals=[];this._registrations=[];this._data={}}
+  constructor(){this._intervals=[];this._registrations=[];this._data={};this.manifest={id:'distributed-sync',version:'1.2.0'};this.app={vault:{configDir:'.obsidian'}}}
   registerInterval(id){this._intervals.push(id);return id}
   register(cb){this._registrations.push(cb);return cb}
   registerEvent(){}
@@ -45,7 +45,7 @@ function mockApp(files=new Map()){
     async write(p,d){files.set(p,d)},
     async mkdir(){},
   };
-  return {files,vault:{adapter,on:()=>'',getFiles:()=>[]}};
+  return {files,vault:{configDir:'.obsidian',adapter,on:()=>'',getFiles:()=>[]}};
 }
 
 async function loadPlugin(data){

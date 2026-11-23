@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {LocalDiagnostics,DIAGNOSTICS_DIR} from '../plugin/src/diagnostics.ts';
+import {LocalDiagnostics} from '../plugin/src/diagnostics.ts';
+const DIAGNOSTICS_DIR = '.obsidian/plugins/distributed-sync/diagnostics';
 function setup(){
  const files=new Map();
  const adapter={exists:async p=>files.has(p),mkdir:async()=>{},stat:async p=>files.has(p)?{size:Buffer.byteLength(files.get(p))}:null,read:async p=>files.get(p),write:async(p,v)=>{files.set(p,v);}};
- const d=new LocalDiagnostics(adapter);const target=new EventTarget();
+  const d=new LocalDiagnostics(adapter,{pluginDir:'.obsidian/plugins/distributed-sync'});const target=new EventTarget();
  const records=()=>[...files].filter(([p])=>p.endsWith('.jsonl')).flatMap(([,v])=>v.split('\n').filter(Boolean).map(JSON.parse));
  return {d,target,records,files};
 }

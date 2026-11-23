@@ -306,7 +306,7 @@ export class SyncEngine {
         if (!fileExists) {
           // Local deletion
           try {
-            const res = await this.client.deleteFile(path, state.base_rev);
+            await this.client.deleteFile(path, state.base_rev);
             this.index.remove(path);
             // Write acknowledgments do not advance the pull checkpoint.
             pushedCount++;
@@ -701,7 +701,7 @@ export class SyncEngine {
           });
           return false;
         }
-      } catch {}
+      } catch { /* Fall through to conflict-copy recovery when merging fails. */ }
     }
 
     if (conflict.deleted) {

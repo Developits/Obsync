@@ -1,5 +1,4 @@
 // Local-only diagnostics. Never pass free-form messages or note identifiers to disk.
-export const DIAGNOSTICS_DIR = ".obsidian/plugins/distributed-sync/diagnostics";
 const EVENTS = new Set(["session_start", "session_stop", "previous_session_unclean", "marker_invalid", "sync_start", "sync_result", "sync_failure", "sync_exception", "startup_failure", "status_failure", "token_failure", "api_failure", "global_error", "unhandled_rejection", "queue_overflow"]);
 const OPERATIONS = new Set(["scan", "pull", "push", "save"]);
 const CATEGORIES = new Set(["error", "type", "range", "syntax", "reference", "api", "conflict", "unknown"]);
@@ -19,6 +18,7 @@ export interface DiagnosticAdapter {
   write(path: string, text: string): Promise<unknown>;
 }
 interface Options {
+  pluginDir: string;
   pluginVersion?: string;
   obsidianVersion?: string;
   platform?: string;
@@ -105,7 +105,12 @@ export class LocalDiagnostics {
   private buildSha256 = "unknown";
   private detachGlobals: (() => void) | null = null;
   private readonly adapter: DiagnosticAdapter;
-  constructor(adapter: DiagnosticAdapter, options: Options = {}) { this.adapter = adapter; this.options = options; }
+  private readonly diagnosticsDir: string;
+  constructor(adapter: DiagnosticAdapter, options: Options) {
+    this.adapter = adapter;
+    this.options = options;
+    this.diagnosticsDir = `${options.pluginDir}/diagnostics`;
+  }
   private warn(): void {
     if (!this.failed) {
       this.failed = true;
@@ -137,11 +142,11 @@ export class LocalDiagnostics {
       for (const line of batch) {
         try {
           if (bytes(this.current) + bytes(line) > 256 * 1024) {
-            await this.adapter.write(`${DIAGNOSTICS_DIR}/previous.jsonl`, this.current);
+            await this.adapter.write(`${this.diagnosticsDir}/previous.jsonl`, this.current);
             this.current = "";
           }
           const next = this.current + line;
-          await this.adapter.write(`${DIAGNOSTICS_DIR}/current.jsonl`, next);
+          await this.adapter.write(`${this.diagnosticsDir}/current.jsonl`, next);
           this.current = next;
         } catch { this.warn(); }
       }
@@ -165,7 +170,7 @@ export class LocalDiagnostics {
 
   private async initialize(): Promise<void> {
     try {
-      if (!(await this.adapter.exists(DIAGNOSTICS_DIR))) await this.adapter.mkdir(DIAGNOSTICS_DIR);
+      if (!(await this.adapter.exists(this.diagnosticsDir))) await this.adapter.mkdir(this.diagnosticsDir);
     } catch { this.warn(); }
     await this.identifyBuild();
     const old = await this.readBounded("current.jsonl", 256 * 1024);
@@ -183,7 +188,7 @@ export class LocalDiagnostics {
         if (state.state === "open") this.log("previous_session_unclean");
       } catch { this.log("marker_invalid"); }
     }
-    try { await this.adapter.write(`${DIAGNOSTICS_DIR}/session.json`, JSON.stringify({schema:1,state:"open"})); } catch { this.warn(); }
+    try { await this.adapter.write(`${this.diagnosticsDir}/session.json`, JSON.stringify({schema:1,state:"open"})); } catch { this.warn(); }
     this.initializing = false;
     this.log("session_start");
     this.kick();
@@ -192,7 +197,7 @@ export class LocalDiagnostics {
 
   private async readBounded(name: string, cap: number): Promise<string | null> {
     try {
-      const path = `${DIAGNOSTICS_DIR}/${name}`;
+      const path = `${this.diagnosticsDir}/${name}`;
       const stat = await this.adapter.stat(path);
       if (stat === null) return null;
       if (!Number.isSafeInteger(stat.size) || stat.size < 0 || stat.size > cap) { this.warn(); this.skippedRecords++; return null; }
@@ -220,7 +225,7 @@ export class LocalDiagnostics {
     // Read the installed bytes, not Git HEAD (the working tree may be dirty).
     try {
       if (!this.adapter.readBinary) return;
-      const path = ".obsidian/plugins/distributed-sync/main.js";
+      const path = `${this.options.pluginDir}/main.js`;
       const stat = await this.adapter.stat(path);
       if (!stat || !Number.isSafeInteger(stat.size) || stat.size < 0 || stat.size > 4 * 1024 * 1024) return;
       const data = await this.adapter.readBinary(path);
@@ -242,7 +247,7 @@ export class LocalDiagnostics {
         rows.push(row); used += size;
       }
     }
-    const path = `${DIAGNOSTICS_DIR}/export.json`;
+    const path = `${this.diagnosticsDir}/export.json`;
     try {
       await this.adapter.write(path, JSON.stringify({schema:1, exportTime:Date.now(), buildSha256:this.buildSha256, diagnosticsUnavailable:this.failed, skippedRecords:this.skippedRecords, events:rows}));
       return {path, unavailable:this.failed};
@@ -282,7 +287,7 @@ export class LocalDiagnostics {
       await this.startPromise;
       await this.flush();
       if (!this.failed) {
-        try { await this.adapter.write(`${DIAGNOSTICS_DIR}/session.json`, JSON.stringify({schema:1,state:"closed"})); } catch { this.warn(); }
+      try { await this.adapter.write(`${this.diagnosticsDir}/session.json`, JSON.stringify({schema:1,state:"closed"})); } catch { this.warn(); }
       }
     })();
     return this.closePromise;

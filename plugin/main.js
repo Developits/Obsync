@@ -31,7 +31,6 @@ module.exports = __toCommonJS(main_exports);
 var import_obsidian2 = require("obsidian");
 
 // src/diagnostics.ts
-var DIAGNOSTICS_DIR = ".obsidian/plugins/distributed-sync/diagnostics";
 var EVENTS = /* @__PURE__ */ new Set(["session_start", "session_stop", "previous_session_unclean", "marker_invalid", "sync_start", "sync_result", "sync_failure", "sync_exception", "startup_failure", "status_failure", "token_failure", "api_failure", "global_error", "unhandled_rejection", "queue_overflow"]);
 var OPERATIONS = /* @__PURE__ */ new Set(["scan", "pull", "push", "save"]);
 var CATEGORIES = /* @__PURE__ */ new Set(["error", "type", "range", "syntax", "reference", "api", "conflict", "unknown"]);
@@ -121,9 +120,11 @@ var LocalDiagnostics = class {
   buildSha256 = "unknown";
   detachGlobals = null;
   adapter;
-  constructor(adapter, options = {}) {
+  diagnosticsDir;
+  constructor(adapter, options) {
     this.adapter = adapter;
     this.options = options;
+    this.diagnosticsDir = `${options.pluginDir}/diagnostics`;
   }
   warn() {
     if (!this.failed) {
@@ -167,11 +168,11 @@ var LocalDiagnostics = class {
       for (const line of batch) {
         try {
           if (bytes(this.current) + bytes(line) > 256 * 1024) {
-            await this.adapter.write(`${DIAGNOSTICS_DIR}/previous.jsonl`, this.current);
+            await this.adapter.write(`${this.diagnosticsDir}/previous.jsonl`, this.current);
             this.current = "";
           }
           const next = this.current + line;
-          await this.adapter.write(`${DIAGNOSTICS_DIR}/current.jsonl`, next);
+          await this.adapter.write(`${this.diagnosticsDir}/current.jsonl`, next);
           this.current = next;
         } catch {
           this.warn();
@@ -196,7 +197,7 @@ var LocalDiagnostics = class {
   }
   async initialize() {
     try {
-      if (!await this.adapter.exists(DIAGNOSTICS_DIR)) await this.adapter.mkdir(DIAGNOSTICS_DIR);
+      if (!await this.adapter.exists(this.diagnosticsDir)) await this.adapter.mkdir(this.diagnosticsDir);
     } catch {
       this.warn();
     }
@@ -222,7 +223,7 @@ var LocalDiagnostics = class {
       }
     }
     try {
-      await this.adapter.write(`${DIAGNOSTICS_DIR}/session.json`, JSON.stringify({ schema: 1, state: "open" }));
+      await this.adapter.write(`${this.diagnosticsDir}/session.json`, JSON.stringify({ schema: 1, state: "open" }));
     } catch {
       this.warn();
     }
@@ -233,7 +234,7 @@ var LocalDiagnostics = class {
   }
   async readBounded(name, cap) {
     try {
-      const path = `${DIAGNOSTICS_DIR}/${name}`;
+      const path = `${this.diagnosticsDir}/${name}`;
       const stat = await this.adapter.stat(path);
       if (stat === null) return null;
       if (!Number.isSafeInteger(stat.size) || stat.size < 0 || stat.size > cap) {
@@ -271,7 +272,7 @@ var LocalDiagnostics = class {
   async identifyBuild() {
     try {
       if (!this.adapter.readBinary) return;
-      const path = ".obsidian/plugins/distributed-sync/main.js";
+      const path = `${this.options.pluginDir}/main.js`;
       const stat = await this.adapter.stat(path);
       if (!stat || !Number.isSafeInteger(stat.size) || stat.size < 0 || stat.size > 4 * 1024 * 1024) return;
       const data = await this.adapter.readBinary(path);
@@ -297,7 +298,7 @@ var LocalDiagnostics = class {
         used += size;
       }
     }
-    const path = `${DIAGNOSTICS_DIR}/export.json`;
+    const path = `${this.diagnosticsDir}/export.json`;
     try {
       await this.adapter.write(path, JSON.stringify({ schema: 1, exportTime: Date.now(), buildSha256: this.buildSha256, diagnosticsUnavailable: this.failed, skippedRecords: this.skippedRecords, events: rows }));
       return { path, unavailable: this.failed };
@@ -340,7 +341,7 @@ var LocalDiagnostics = class {
       await this.flush();
       if (!this.failed) {
         try {
-          await this.adapter.write(`${DIAGNOSTICS_DIR}/session.json`, JSON.stringify({ schema: 1, state: "closed" }));
+          await this.adapter.write(`${this.diagnosticsDir}/session.json`, JSON.stringify({ schema: 1, state: "closed" }));
         } catch {
           this.warn();
         }
@@ -449,13 +450,7 @@ var SyncClient = class {
       ...this.deviceName ? { "X-Device": this.deviceName } : {},
       ...opts.headers ?? {}
     };
-    let reqFn = this.requestUrlFn;
-    if (!reqFn && typeof require !== "undefined") {
-      try {
-        reqFn = require("obsidian").requestUrl;
-      } catch {
-      }
-    }
+    const reqFn = this.requestUrlFn;
     if (reqFn) {
       const resp = await reqFn({
         url: fullUrl,
@@ -464,7 +459,7 @@ var SyncClient = class {
         headers,
         throw: false
       });
-      const httpResp2 = {
+      const httpResp = {
         status: resp.status,
         headers: Object.fromEntries(
           Object.entries(resp.headers || {}).map(([k, v]) => [k.toLowerCase(), String(v)])
@@ -472,30 +467,16 @@ var SyncClient = class {
         json: async () => resp.json,
         arrayBuffer: async () => resp.arrayBuffer
       };
-      return this.handleResponse(httpResp2);
+      return this.handleResponse(httpResp);
     }
-    const fetchResp = await fetch(fullUrl, {
-      method,
-      body: opts.body,
-      headers
-    });
-    const headerMap = {};
-    fetchResp.headers.forEach((val, key) => {
-      headerMap[key.toLowerCase()] = val;
-    });
-    const httpResp = {
-      status: fetchResp.status,
-      headers: headerMap,
-      json: () => fetchResp.json(),
-      arrayBuffer: () => fetchResp.arrayBuffer()
-    };
-    return this.handleResponse(httpResp);
+    throw new Error("SyncClient requires an injected requestUrl transport");
   }
   async handleResponse(resp) {
     if (resp.status === 409) {
       let j = {};
       try {
-        j = await resp.json();
+        const value = await resp.json();
+        if (value && typeof value === "object" && !Array.isArray(value)) j = value;
       } catch {
       }
       throw new ConflictError(
@@ -509,7 +490,8 @@ var SyncClient = class {
     if (resp.status >= 400) {
       let j = {};
       try {
-        j = await resp.json();
+        const value = await resp.json();
+        if (value && typeof value === "object" && !Array.isArray(value)) j = value;
       } catch {
       }
       throw new ApiError(
@@ -1179,7 +1161,7 @@ var SyncEngine = class {
         const fileExists = await this.adapter.exists(path);
         if (!fileExists) {
           try {
-            const res = await this.client.deleteFile(path, state.base_rev);
+            await this.client.deleteFile(path, state.base_rev);
             this.index.remove(path);
             pushedCount++;
           } catch (err) {
@@ -1598,20 +1580,26 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
   diagnostics = null;
   diagnosticsConfiguration = Promise.resolve();
   unloading = false;
+  get pluginDir() {
+    return this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+  }
+  get syncExcludes() {
+    return [...this.settings.excludes, this.app.vault.configDir];
+  }
   async onload() {
     await this.loadSettings();
     await this.configureDiagnostics();
     this.addCommand({ id: "export-diagnostics", name: "Export local diagnostics", callback: () => this.exportDiagnostics() });
     const storageAdapter = {
       read: async (path) => {
-        const fullPath = `.obsidian/plugins/distributed-sync/${path}`;
+        const fullPath = `${this.pluginDir}/${path}`;
         const exists = await this.app.vault.adapter.exists(fullPath);
         if (!exists) return null;
         return await this.app.vault.adapter.read(fullPath);
       },
       write: async (path, data) => {
-        const fullPath = `.obsidian/plugins/distributed-sync/${path}`;
-        const dir = ".obsidian/plugins/distributed-sync";
+        const fullPath = `${this.pluginDir}/${path}`;
+        const dir = this.pluginDir;
         if (!await this.app.vault.adapter.exists(dir)) {
           await this.app.vault.adapter.mkdir(dir);
         }
@@ -1629,10 +1617,10 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
     this.statusBarItem = this.addStatusBarItem();
     this.updateStatus("idle");
     this.statusBarItem.onClickEvent(() => {
-      this.triggerSync(true);
+      void this.triggerSync(true);
     });
     this.addRibbonIcon("refresh-cw", "Sync Vault", () => {
-      this.triggerSync(true);
+      void this.triggerSync(true);
     });
     this.addCommand({
       id: "sync-now",
@@ -1704,7 +1692,7 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
       index: this.index,
       client: this.client,
       deviceName: this.settings.deviceName,
-      excludes: this.settings.excludes,
+      excludes: this.syncExcludes,
       onConflict: (orig, conflict) => {
         new import_obsidian2.Notice(`Sync conflict on ${orig}. Saved remote version to ${conflict}`, 8e3);
         this.updateStatus("conflict");
@@ -1730,12 +1718,12 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
     this.clearAutoSync();
     if (!this.settings.token || !this.settings.autoSync) return;
     this.syncTimer = window.setInterval(() => {
-      if (this.settings.autoSync && this.settings.token) this.triggerSync(false);
+      if (this.settings.autoSync && this.settings.token) void this.triggerSync(false);
     }, Math.max(this.settings.syncIntervalSeconds, 5) * 1e3);
     this.registerInterval(this.syncTimer);
     this.startupTimer = window.setTimeout(() => {
       this.startupTimer = null;
-      this.triggerSync(false);
+      void this.triggerSync(false);
     }, 1500);
     if (this.register) {
       this.register(() => {
@@ -1778,6 +1766,7 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
     }
     if (this.diagnostics) return;
     this.diagnostics = new LocalDiagnostics(this.app.vault.adapter, {
+      pluginDir: this.pluginDir,
       pluginVersion: this.manifest?.version,
       obsidianVersion: import_obsidian2.apiVersion,
       platform: import_obsidian2.Platform?.isMobile ? "mobile" : import_obsidian2.Platform?.isDesktop ? "desktop" : "unknown",
@@ -1866,13 +1855,13 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
     }
     this.debounceTimer = window.setTimeout(() => {
       this.debounceTimer = null;
-      this.triggerSync(false);
+      void this.triggerSync(false);
     }, 2e3);
   }
   onFileCreated(file) {
     if (!(file instanceof import_obsidian2.TFile)) return;
     const path = normalizePath(file.path);
-    if (isIgnored(path, this.settings.excludes)) return;
+    if (isIgnored(path, this.syncExcludes)) return;
     const known = this.index.get(path);
     this.index.set(path, {
       ...known,
@@ -1886,7 +1875,7 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
   }
   onFileModified(file) {
     const path = normalizePath(file.path);
-    if (isIgnored(path, this.settings.excludes)) return;
+    if (isIgnored(path, this.syncExcludes)) return;
     const known = this.index.get(path);
     this.index.set(path, {
       ...known,
@@ -1900,7 +1889,7 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
   }
   onFileDeleted(file) {
     const path = normalizePath(file.path);
-    if (isIgnored(path, this.settings.excludes)) return;
+    if (isIgnored(path, this.syncExcludes)) return;
     const known = this.index.get(path);
     if (known) {
       this.index.set(path, {
@@ -1913,13 +1902,13 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
   onFileRenamed(file, oldPath) {
     const oldNorm = normalizePath(oldPath);
     const newNorm = normalizePath(file.path);
-    if (isIgnored(oldNorm, this.settings.excludes) && isIgnored(newNorm, this.settings.excludes)) return;
+    if (isIgnored(oldNorm, this.syncExcludes) && isIgnored(newNorm, this.syncExcludes)) return;
     const paths = file instanceof import_obsidian2.TFile ? [oldNorm] : this.index.allEntries().map(([path]) => path).filter((path) => path.startsWith(oldNorm + "/"));
     for (const oldFile of paths) {
       const newFile = newNorm + oldFile.slice(oldNorm.length);
       const known = this.index.get(oldFile);
-      if (isIgnored(oldFile, this.settings.excludes)) continue;
-      if (isIgnored(newFile, this.settings.excludes)) {
+      if (isIgnored(oldFile, this.syncExcludes)) continue;
+      if (isIgnored(newFile, this.syncExcludes)) {
         if (known) this.index.remove(oldFile);
         continue;
       }
@@ -1931,7 +1920,7 @@ var DistributedSyncPlugin = class extends import_obsidian2.Plugin {
         this.onFileCreated(file);
       }
     }
-    if (isIgnored(oldNorm, this.settings.excludes) && file instanceof import_obsidian2.TFile) this.onFileCreated(file);
+    if (isIgnored(oldNorm, this.syncExcludes) && file instanceof import_obsidian2.TFile) this.onFileCreated(file);
     this.scheduleDebouncedSync();
   }
 };

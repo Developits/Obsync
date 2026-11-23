@@ -14,7 +14,7 @@ function memory() {
 }
 function make(adapter = memory(), options = {}) {
   assert.ok(module?.LocalDiagnostics, 'local diagnostics implementation is available');
-  return new module.LocalDiagnostics(adapter, {pluginVersion:'1.0.1', obsidianVersion:'1.8.7', platform:'desktop', ...options});
+  return new module.LocalDiagnostics(adapter, {pluginDir:'.obsidian/plugins/distributed-sync', pluginVersion:'1.0.1', obsidianVersion:'1.8.7', platform:'desktop', ...options});
 }
 function records(adapter) {
   return ['previous.jsonl','current.jsonl'].flatMap(n => (adapter.files.get(`${ROOT}/${n}`) ?? '').split('\n').filter(Boolean).map(JSON.parse));

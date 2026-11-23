@@ -22,6 +22,12 @@ export default class DistributedSyncPlugin extends Plugin {
   private diagnostics: LocalDiagnostics | null = null;
   private diagnosticsConfiguration: Promise<void> = Promise.resolve();
   private unloading = false;
+  private get pluginDir(): string {
+    return this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+  }
+  private get syncExcludes(): string[] {
+    return [...this.settings.excludes, this.app.vault.configDir];
+  }
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -31,14 +37,14 @@ export default class DistributedSyncPlugin extends Plugin {
     // Initialize local index
     const storageAdapter: StorageAdapter = {
       read: async (path: string) => {
-        const fullPath = `.obsidian/plugins/distributed-sync/${path}`;
+        const fullPath = `${this.pluginDir}/${path}`;
         const exists = await this.app.vault.adapter.exists(fullPath);
         if (!exists) return null;
         return await this.app.vault.adapter.read(fullPath);
       },
       write: async (path: string, data: string) => {
-        const fullPath = `.obsidian/plugins/distributed-sync/${path}`;
-        const dir = ".obsidian/plugins/distributed-sync";
+        const fullPath = `${this.pluginDir}/${path}`;
+        const dir = this.pluginDir;
         if (!(await this.app.vault.adapter.exists(dir))) {
           await this.app.vault.adapter.mkdir(dir);
         }
@@ -60,12 +66,12 @@ export default class DistributedSyncPlugin extends Plugin {
     this.statusBarItem = this.addStatusBarItem();
     this.updateStatus("idle");
     this.statusBarItem.onClickEvent(() => {
-      this.triggerSync(true);
+      void this.triggerSync(true);
     });
 
     // UI: Ribbon Icon
     this.addRibbonIcon("refresh-cw", "Sync Vault", () => {
-      this.triggerSync(true);
+      void this.triggerSync(true);
     });
 
     // Commands
@@ -149,7 +155,7 @@ export default class DistributedSyncPlugin extends Plugin {
       index: this.index,
       client: this.client,
       deviceName: this.settings.deviceName,
-      excludes: this.settings.excludes,
+      excludes: this.syncExcludes,
       onConflict: (orig, conflict) => {
         new Notice(`Sync conflict on ${orig}. Saved remote version to ${conflict}`, 8000);
         this.updateStatus("conflict");
@@ -180,13 +186,13 @@ export default class DistributedSyncPlugin extends Plugin {
     if (!this.settings.token || !this.settings.autoSync) return;
 
     this.syncTimer = window.setInterval(() => {
-      if (this.settings.autoSync && this.settings.token) this.triggerSync(false);
+      if (this.settings.autoSync && this.settings.token) void this.triggerSync(false);
     }, Math.max(this.settings.syncIntervalSeconds, 5) * 1000);
     this.registerInterval(this.syncTimer);
 
     this.startupTimer = window.setTimeout(() => {
       this.startupTimer = null;
-      this.triggerSync(false);
+      void this.triggerSync(false);
     }, 1500);
     if (this.register) {
       this.register(() => {
@@ -234,6 +240,7 @@ export default class DistributedSyncPlugin extends Plugin {
     }
     if (this.diagnostics) return;
     this.diagnostics = new LocalDiagnostics(this.app.vault.adapter, {
+      pluginDir:this.pluginDir,
       pluginVersion:this.manifest?.version, obsidianVersion:apiVersion,
       platform:Platform?.isMobile ? "mobile" : Platform?.isDesktop ? "desktop" : "unknown",
       onFailure:() => { new Notice("Local sync diagnostics unavailable. Sync is unaffected; diagnostic export may be incomplete.", 8000); },
@@ -323,14 +330,14 @@ export default class DistributedSyncPlugin extends Plugin {
     }
     this.debounceTimer = window.setTimeout(() => {
       this.debounceTimer = null;
-      this.triggerSync(false);
+      void this.triggerSync(false);
     }, 2000);
   }
 
   private onFileCreated(file: TAbstractFile): void {
     if (!(file instanceof TFile)) return;
     const path = normalizePath(file.path);
-    if (isIgnored(path, this.settings.excludes)) return;
+    if (isIgnored(path, this.syncExcludes)) return;
     const known = this.index.get(path);
     this.index.set(path, {
       ...known,
@@ -345,7 +352,7 @@ export default class DistributedSyncPlugin extends Plugin {
 
   private onFileModified(file: TAbstractFile): void {
     const path = normalizePath(file.path);
-    if (isIgnored(path, this.settings.excludes)) return;
+    if (isIgnored(path, this.syncExcludes)) return;
     const known = this.index.get(path);
     this.index.set(path, {
       ...known,
@@ -360,7 +367,7 @@ export default class DistributedSyncPlugin extends Plugin {
 
   private onFileDeleted(file: TAbstractFile): void {
     const path = normalizePath(file.path);
-    if (isIgnored(path, this.settings.excludes)) return;
+    if (isIgnored(path, this.syncExcludes)) return;
     const known = this.index.get(path);
     if (known) {
       this.index.set(path, {
@@ -374,15 +381,15 @@ export default class DistributedSyncPlugin extends Plugin {
   private onFileRenamed(file: TAbstractFile, oldPath: string): void {
     const oldNorm = normalizePath(oldPath);
     const newNorm = normalizePath(file.path);
-    if (isIgnored(oldNorm, this.settings.excludes) && isIgnored(newNorm, this.settings.excludes)) return;
+    if (isIgnored(oldNorm, this.syncExcludes) && isIgnored(newNorm, this.syncExcludes)) return;
 
     const paths = file instanceof TFile ? [oldNorm] : this.index.allEntries()
       .map(([path]) => path).filter((path) => path.startsWith(oldNorm + "/"));
     for (const oldFile of paths) {
       const newFile = newNorm + oldFile.slice(oldNorm.length);
       const known = this.index.get(oldFile);
-      if (isIgnored(oldFile, this.settings.excludes)) continue;
-      if (isIgnored(newFile, this.settings.excludes)) {
+      if (isIgnored(oldFile, this.syncExcludes)) continue;
+      if (isIgnored(newFile, this.syncExcludes)) {
         // Moving into an excluded location is not a deletion of the remote
         // copy. Detach tracking instead of leaving a dirty old path, which
         // would otherwise be pushed as a server-side delete.
@@ -397,7 +404,7 @@ export default class DistributedSyncPlugin extends Plugin {
         this.onFileCreated(file);
       }
     }
-    if (isIgnored(oldNorm, this.settings.excludes) && file instanceof TFile) this.onFileCreated(file);
+    if (isIgnored(oldNorm, this.syncExcludes) && file instanceof TFile) this.onFileCreated(file);
     this.scheduleDebouncedSync();
   }
 }

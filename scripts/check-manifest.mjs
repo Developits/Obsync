@@ -7,6 +7,9 @@ const pluginPackage = read("plugin/package.json");
 const rootPackage = read("package.json");
 const versions = read("versions.json");
 
+if (/\bobsidian\b/i.test(manifest.description) || manifest.description.length > 250 || !manifest.description.endsWith(".")) {
+  throw new Error('Description must omit "Obsidian", end with a period, and be at most 250 characters');
+}
 if (manifest.id.includes("obsidian")) {
   throw new Error('Plugin ID must not contain "obsidian"');
 }

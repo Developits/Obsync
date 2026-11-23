@@ -1,5 +1,5 @@
 // REST client for the /v1 sync protocol.
-// Compatible with both Obsidian's requestUrl() and standard fetch() in headless test environments.
+// The application injects requestUrl; headless tests inject their own transport.
 
 import { encodePath } from "./paths.ts";
 
@@ -83,7 +83,7 @@ export type RequestUrlFn = (params: {
 }) => Promise<{
   status: number;
   headers: Record<string, string>;
-  json: any;
+  json: unknown;
   arrayBuffer: ArrayBuffer;
 }>;
 
@@ -122,13 +122,7 @@ export class SyncClient {
       ...(opts.headers ?? {}),
     };
 
-    // Use requestUrl if provided or available in Obsidian CommonJS environment
-    let reqFn = this.requestUrlFn;
-    if (!reqFn && typeof require !== "undefined") {
-      try {
-        reqFn = require("obsidian").requestUrl;
-      } catch {}
-    }
+    const reqFn = this.requestUrlFn;
 
     if (reqFn) {
       const resp = await reqFn({
@@ -151,34 +145,16 @@ export class SyncClient {
       return this.handleResponse(httpResp);
     }
 
-    // Fallback to standard fetch (Node.js / tests)
-    const fetchResp = await fetch(fullUrl, {
-      method,
-      body: opts.body,
-      headers,
-    });
-
-    const headerMap: Record<string, string> = {};
-    fetchResp.headers.forEach((val, key) => {
-      headerMap[key.toLowerCase()] = val;
-    });
-
-    const httpResp: HttpResponse = {
-      status: fetchResp.status,
-      headers: headerMap,
-      json: () => fetchResp.json(),
-      arrayBuffer: () => fetchResp.arrayBuffer(),
-    };
-
-    return this.handleResponse(httpResp);
+    throw new Error("SyncClient requires an injected requestUrl transport");
   }
 
   private async handleResponse(resp: HttpResponse): Promise<HttpResponse> {
     if (resp.status === 409) {
-      let j: any = {};
+      let j: Record<string, unknown> = {};
       try {
-        j = await resp.json();
-      } catch {}
+        const value = await resp.json();
+        if (value && typeof value === "object" && !Array.isArray(value)) j = value as Record<string, unknown>;
+      } catch { /* Malformed error bodies use the defaults below. */ }
       throw new ConflictError(
         String(j.path ?? ""),
         Number(j.server_rev ?? 0),
@@ -189,10 +165,11 @@ export class SyncClient {
     }
 
     if (resp.status >= 400) {
-      let j: any = {};
+      let j: Record<string, unknown> = {};
       try {
-        j = await resp.json();
-      } catch {}
+        const value = await resp.json();
+        if (value && typeof value === "object" && !Array.isArray(value)) j = value as Record<string, unknown>;
+      } catch { /* Malformed error bodies use the defaults below. */ }
       throw new ApiError(
         resp.status,
         String(j.error ?? "http_error"),
